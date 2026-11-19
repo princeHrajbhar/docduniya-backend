@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    image: docduniya-backend
+    container_name: docduniya-backend
+    ports:
+      - '${PORT:-3000}:3000'
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    restart: unless-stopped
