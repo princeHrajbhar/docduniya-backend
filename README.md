@@ -51,14 +51,46 @@ docker run -p 3000:3000 --env-file .env docduniya-backend
 
 ```
 src/
-  config/        # env validation (zod), logger
-  controllers/   # request handlers
-  middlewares/   # error handler, 404, validation
-  routes/        # route definitions (mounted at /api/v1)
-  utils/         # helpers (ApiError)
-  app.ts         # Express app factory
-  server.ts      # HTTP server + graceful shutdown
-tests/           # Vitest + Supertest tests
+  config/          # env validation (zod), logger, MongoDB connection
+  controllers/     # request handlers
+  middlewares/     # error handler, 404, validation, rate limits, CSRF/shape guards
+  modules/
+    admin/auth/    # registration, OTP, login, Google, sessions, passwords, roles & permissions
+    users/         # admin user management
+    email/         # SMTP provider, templates, suppression list, delivery log
+    file-manager/  # provider-agnostic storage (S3), image → WebP optimisation, upload policies
+    managed-files/ # per-user file records on top of file-manager
+    assets/        # media library (SEO metadata, slugs, replace, bulk delete)
+    admin/blog/    # blog posts
+    admin/blogCategories/ # blog categories
+  routes/          # route definitions (mounted at /api/v1)
+  utils/           # helpers (ApiError, AppError, xlsx)
+  app.ts           # Express app factory
+  server.ts        # HTTP server + graceful shutdown
+tests/             # Vitest + Supertest tests
+```
+
+## API overview (`/api/v1`)
+
+| Prefix             | Access                            | Purpose                                                                                                                  |
+| ------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `/auth`            | public / signed-in                | register, verify-otp, resend-otp, login, google, refresh, logout, logout-all, forgot/reset/change password, me, sessions |
+| `/roles`           | `roles.manage`                    | role CRUD, permission catalog (`/assignable` needs `users.manage`)                                                       |
+| `/users`           | `users.manage`                    | create, list, export (xlsx), update, delete, verify, unlock, sessions, email preference                                  |
+| `/files`           | signed-in / `files.manage`        | own files (`/mine`, `/`, `/:id`) and file manager (`/admin/*`)                                                           |
+| `/assets`          | `assets.manage`                   | media library                                                                                                            |
+| `/blogs`           | public / `blogs.manage`           | posts (drafts visible only to blog managers), banner + resource uploads, status, stats, bulk delete                      |
+| `/blog-categories` | public / `blog-categories.manage` | blog category CRUD                                                                                                       |
+| `/email`           | `email.manage`                    | suppression list and delivery log                                                                                        |
+
+Auth uses short-lived JWT access tokens (15 min) plus rotating refresh tokens stored as
+httpOnly cookies (`Authorization: Bearer` is also accepted). Every request checks that the
+session still exists, so logout and password changes revoke access immediately.
+
+Create the first Super Admin with:
+
+```bash
+ADMIN_EMAIL=owner@example.com ADMIN_PASSWORD='Str0ng!Pass' npm run admin:create
 ```
 
 ## Adding a route
