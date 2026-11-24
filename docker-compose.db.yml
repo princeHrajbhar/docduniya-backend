@@ -1,0 +1,25 @@
+# Development only: loopback access, disposable application data, no authentication.
+name: docduniya-local-db
+services:
+  mongo:
+    image: mongo:8.0
+    command: ['mongod', '--replSet', 'rs0', '--bind_ip_all', '--port', '27017']
+    ports:
+      - '127.0.0.1:27018:27017'
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'mongosh',
+          '--quiet',
+          '--eval',
+          "try { rs.status(); } catch (e) { if (e.code === 94) rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]}); else throw e; } if (!db.hello().isWritablePrimary) quit(1);",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
+volumes:
+  mongo-data:

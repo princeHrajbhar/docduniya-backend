@@ -6,6 +6,7 @@ import { verifyAccessToken } from './auth.jwt.js';
 import type { Permission } from './roles/permission.constants.js';
 import { getRolePermissions } from './roles/role.service.js';
 import { isSessionActive } from './session.service.js';
+import { User } from './models/user.model.js';
 
 /**
  * Authenticates the request from `Authorization: Bearer <token>` or the
@@ -36,11 +37,16 @@ export async function protect(req: Request, _res: Response, next: NextFunction):
     return next(new AppError('Session expired or revoked', 401, ErrorCode.SESSION_NOT_FOUND));
   }
 
+  const currentUser = await User.findOne({ _id: decoded.userId, isActive: true, isVerified: true })
+    .select('role')
+    .lean();
+  if (!currentUser)
+    return next(new AppError('Account is unavailable', 401, ErrorCode.SESSION_NOT_FOUND));
   req.user = {
     userId: decoded.userId,
-    role: decoded.role,
+    role: currentUser.role,
     sessionId: decoded.sessionId,
-    permissions: await getRolePermissions(decoded.role),
+    permissions: await getRolePermissions(currentUser.role),
   };
   next();
 }
@@ -61,11 +67,19 @@ export async function optionalAuth(
   try {
     const decoded = verifyAccessToken(token);
     if (await isSessionActive(decoded.sessionId, decoded.userId)) {
+      const currentUser = await User.findOne({
+        _id: decoded.userId,
+        isActive: true,
+        isVerified: true,
+      })
+        .select('role')
+        .lean();
+      if (!currentUser) return next();
       req.user = {
         userId: decoded.userId,
-        role: decoded.role,
+        role: currentUser.role,
         sessionId: decoded.sessionId,
-        permissions: await getRolePermissions(decoded.role),
+        permissions: await getRolePermissions(currentUser.role),
       };
     }
   } catch (error) {

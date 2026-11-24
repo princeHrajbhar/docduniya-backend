@@ -7,10 +7,12 @@ import { pinoHttp } from 'pino-http';
 import { env, isProduction } from './config/env.js';
 import { logger } from './config/logger.js';
 import routes from './routes/index.js';
+import { webhookRouter } from './modules/billing/billing.routes.js';
 import { notFound } from './middlewares/not-found.js';
 import { errorHandler } from './middlewares/error-handler.js';
 import { createRateLimiter } from './middlewares/rate-limit.js';
 import { crossSiteMutationGuard, requestShapeGuard } from './middlewares/request-protection.js';
+import { randomUUID } from 'node:crypto';
 
 /**
  * Cookie-based auth requires credentialed CORS, which cannot use `*`. Allowed
@@ -51,7 +53,8 @@ function buildCorsOptions(): CorsOptions {
       callback(new Error('Origin is not allowed by CORS'));
     },
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Idempotency-Key'],
+    exposedHeaders: ['X-Request-Id'],
   };
 }
 
@@ -74,11 +77,27 @@ export const createApp = () => {
     }),
   );
 
+  // Signed gateway webhooks need the exact raw bytes, so they bypass the JSON parser and the
+  // browser-oriented CSRF/request-shape guards. Their signature is their authentication.
+  app.use('/api/v1/webhooks', webhookRouter);
+
   // Body parsing & logging
   app.use(cookieParser());
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: false, limit: '1mb' }));
-  app.use(pinoHttp({ logger }));
+  app.use(
+    pinoHttp({
+      logger,
+      genReqId: (_req, res) => {
+        const requestId = randomUUID();
+        res.setHeader('X-Request-Id', requestId);
+        return requestId;
+      },
+      serializers: {
+        req: (req) => ({ id: req.id, method: req.method, url: String(req.url).split('?')[0] }),
+      },
+    }),
+  );
 
   // Routes
   app.use('/api/v1', crossSiteMutationGuard, requestShapeGuard, routes);

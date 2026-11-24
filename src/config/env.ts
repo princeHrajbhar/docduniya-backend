@@ -56,6 +56,23 @@ const envSchema = z.object({
     .default(50)
     .transform((value) => Math.min(value, 500)),
   MAX_FILES_PER_REQUEST: z.coerce.number().int().positive().default(10),
+
+  // ── Private clinical documents (never the public media bucket) ───────────
+  PRIVATE_DOCUMENTS_BUCKET: optionalString,
+  PRIVATE_DOCUMENTS_REGION: optionalString,
+  /** Maximum size of one private document upload, in megabytes. */
+  PRIVATE_DOCUMENT_MAX_MB: z.coerce.number().int().min(1).max(100).default(20),
+  /** ClamAV clamd host. Files stay quarantined while no scanner is configured. */
+  CLAMAV_HOST: optionalString,
+  CLAMAV_PORT: z.coerce.number().int().positive().default(3310),
+
+  // ── Payments ──────────────────────────────────────────────────────────────
+  RAZORPAY_API_BASE: z.url().default('https://api.razorpay.com/v1'),
+  /** Minutes a prepaid appointment hold waits for a verified capture. */
+  PAYMENT_HOLD_MINUTES: z.coerce.number().int().min(5).max(30).default(15),
+
+  // ── Background workers ────────────────────────────────────────────────────
+  WORKER_POLL_MS: z.coerce.number().int().min(250).max(60_000).default(5000),
 });
 
 const parsed = envSchema.safeParse(process.env);

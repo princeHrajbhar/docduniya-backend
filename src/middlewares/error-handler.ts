@@ -20,7 +20,8 @@ const fail = (res: Response, status: number, code: string, message: string, erro
 
 const requestContext = (req: Request) => ({
   method: req.method,
-  path: req.originalUrl,
+  path: req.originalUrl.split('?')[0],
+  requestId: req.id,
   ip: req.ip,
 });
 
@@ -80,6 +81,14 @@ export const errorHandler = (err: unknown, req: Request, res: Response, _next: N
 
   if (isNamedError(err, 'CastError')) {
     return fail(res, 400, 'BAD_REQUEST', 'Invalid identifier or request value');
+  }
+
+  if (isNamedError(err, 'VersionError')) {
+    return fail(res, 409, 'VERSION_CONFLICT', 'The record changed. Reload it and retry.');
+  }
+
+  if (isNamedError(err, 'StrictModeError')) {
+    return fail(res, 400, 'VALIDATION_ERROR', 'Unexpected field in request');
   }
 
   // body-parser errors (malformed JSON, payload too large) carry `type` and `status`.

@@ -2,6 +2,24 @@
 
 Production-ready REST API starter built with **Node.js 24 (LTS)**, **Express 5** and **TypeScript** (native ES modules).
 
+It implements the DocDuniya healthcare marketplace and provider software described in the
+[architecture](docs/architecture/README.md):
+
+- **Onboarding and identity:** provider onboarding, scoped staff access, patients and dependents,
+  and doctor verification, affiliations and public discovery
+  ([foundation](docs/implementation/foundation.md),
+  [provider marketplace](docs/implementation/provider-marketplace.md)).
+- **Booking and payments:** services and schedules, resource-safe booking and queues, Razorpay
+  payments, invoicing, refunds and the ledger.
+- **Records and privacy:** private documents, consent and sharing, signed clinical records and
+  prescriptions, and diagnostics.
+- **Hospital operations:** pharmacy and stock, and admissions, beds, nursing and discharge.
+- **Engagement and operations:** notifications, support, reviews and provider subscriptions
+  ([platform modules](docs/implementation/platform-modules.md)).
+
+The [completion tracker](docs/implementation/completion-tracker.md) lists what still needs
+external setup or business decisions before production.
+
 ## Tech stack
 
 | Concern      | Tool                                                    |
@@ -23,20 +41,26 @@ Production-ready REST API starter built with **Node.js 24 (LTS)**, **Express 5**
 nvm use            # uses .nvmrc (Node 24)
 npm install
 cp .env.example .env
+docker compose -f docker-compose.db.yml up -d --wait
+npm run db:setup   # explicit collections/indexes, role upgrades, specialty labels, templates
 npm run dev        # http://localhost:3000/api/v1/health
+npm run worker     # background jobs: outbox, payments, refunds, scans, reminders, renewals
 ```
 
 ## Scripts
 
-| Script              | Description                         |
-| ------------------- | ----------------------------------- |
-| `npm run dev`       | Start with hot reload (tsx watch)   |
-| `npm run build`     | Compile TypeScript to `dist/`       |
-| `npm start`         | Run compiled build                  |
-| `npm run typecheck` | Type-check without emitting         |
-| `npm run lint`      | Lint (`lint:fix` to auto-fix)       |
-| `npm run format`    | Format with Prettier                |
-| `npm test`          | Run tests (`test:coverage` for cov) |
+| Script                     | Description                                                     |
+| -------------------------- | --------------------------------------------------------------- |
+| `npm run dev`              | Start with hot reload (tsx watch)                               |
+| `npm run build`            | Compile TypeScript to `dist/`                                   |
+| `npm start`                | Run compiled build                                              |
+| `npm run typecheck`        | Type-check without emitting                                     |
+| `npm run lint`             | Lint (`lint:fix` to auto-fix)                                   |
+| `npm run format`           | Format with Prettier                                            |
+| `npm test`                 | Run tests (`test:coverage` for cov)                             |
+| `npm run test:integration` | Isolated real MongoDB replica-set workflow tests                |
+| `npm run db:setup`         | Add collections, indexes, role upgrades, specialties, templates |
+| `npm run worker`           | Run background jobs (`worker:start` runs the compiled build)    |
 
 ## Docker
 
@@ -63,6 +87,14 @@ src/
     assets/        # media library (SEO metadata, slugs, replace, bulk delete)
     admin/blog/    # blog posts
     admin/blogCategories/ # blog categories
+    organizations/ access/ patients/ practitioners/ providers/  # onboarding and identity
+    scheduling/ appointments/                                   # services, schedules, booking, queue
+    billing/ payments/                                          # invoices, ledger, Razorpay
+    documents/ privacy/                                         # private files, consent, audit
+    clinical/ diagnostics/                                      # signed records, orders, results
+    locations/ inpatient/ pharmacy/                             # hospital operations and stock
+    notifications/ operations/ engagement/ commerce/            # events, support, subscriptions
+  workers/         # background job runner (npm run worker)
   routes/          # route definitions (mounted at /api/v1)
   utils/           # helpers (ApiError, AppError, xlsx)
   app.ts           # Express app factory
