@@ -42,6 +42,9 @@ const patientSchema = new Schema(
       enum: ['ACTIVE', 'TEMPORARY', 'MERGED', 'DECEASED'],
       default: 'ACTIVE',
     },
+    /** Set on a duplicate after a reviewed merge; the survivor lists its merged aliases. */
+    mergedIntoId: ref('Patient', false),
+    mergedPatientIds: { type: [Schema.Types.ObjectId], default: [], validate: bounded(20) },
     authorizationFence: { type: Number, default: 0 },
   },
   aggregateOptions,
@@ -63,10 +66,24 @@ const relationshipSchema = new Schema(
       required: true,
     },
     allowedActions: {
-      type: [{ type: String, enum: ['profile.read', 'profile.update', 'registration.create'] }],
+      type: [
+        {
+          type: String,
+          enum: [
+            'profile.read',
+            'profile.update',
+            'registration.create',
+            'medical.read',
+            'medical.upload',
+            'medical.export',
+            'consent.manage',
+          ],
+        },
+      ],
       required: true,
     },
     authorityReference: { type: String, required: true, maxlength: 500 },
+    medicalAuthorityReference: { type: String, maxlength: 500 },
     status: {
       type: String,
       enum: ['PENDING', 'ACTIVE', 'REJECTED', 'REVOKED', 'EXPIRED'],
@@ -114,3 +131,35 @@ export const PatientRegistration = model(
   registrationSchema,
   'patientRegistrations',
 );
+
+/**
+ * Reviewed duplicate-identity merge. The duplicate (typically a provider-created record the
+ * patient never claimed) becomes an alias of the surviving identity; nothing is deleted and every
+ * custodian's records keep their original references.
+ */
+const mergeCaseSchema = new Schema(
+  {
+    ...metadataFields,
+    sourcePatientId: ref('Patient'),
+    targetPatientId: ref('Patient'),
+    requestedBy: ref('User'),
+    requestedVia: { type: String, enum: ['PATIENT', 'PROVIDER'], required: true },
+    organizationId: ref('Organization', false),
+    evidence: { type: String, required: true, maxlength: 2000 },
+    status: {
+      type: String,
+      enum: ['SUBMITTED', 'APPROVED', 'REJECTED', 'WITHDRAWN'],
+      default: 'SUBMITTED',
+    },
+    reviewedBy: ref('User', false),
+    decidedAt: Date,
+    reason: { type: String, maxlength: 1000 },
+  },
+  aggregateOptions,
+);
+mergeCaseSchema.index(
+  { sourcePatientId: 1 },
+  { unique: true, partialFilterExpression: { status: 'SUBMITTED' } },
+);
+mergeCaseSchema.index({ status: 1, _id: -1 });
+export const PatientMergeCase = model('PatientMergeCase', mergeCaseSchema, 'patientMergeCases');

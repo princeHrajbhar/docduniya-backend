@@ -45,7 +45,11 @@ export const sharingConsentInput = z
   .refine((v) => new Set(v.resourceTypes).size === v.resourceTypes.length, {
     path: ['resourceTypes'],
     message: 'Choose each record type once',
-  });
+  })
+  .refine(
+    (v) => !v.recordPeriodStart || !v.recordPeriodEnd || v.recordPeriodStart < v.recordPeriodEnd,
+    'Record period must end after it starts',
+  );
 export const providerConsentInput = z
   .strictObject({
     patientId: objectId,

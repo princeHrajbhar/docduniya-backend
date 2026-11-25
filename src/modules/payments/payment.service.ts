@@ -83,46 +83,96 @@ function presentIntent(intent: IntentDocument, merchant?: MerchantDocument) {
 
 /** Creates the provider order after commit. A timeout is an unknown outcome, not a failure. */
 export async function prepareOrder(intentId: string): Promise<void> {
-  const intent = await PaymentIntent.findById(intentId);
-  if (!intent || intent.providerOrderId || !['CREATED', 'ORDER_PENDING'].includes(intent.status))
-    return;
+  const now = new Date();
+  const token = randomUUID();
+  const intent = await PaymentIntent.findOneAndUpdate(
+    {
+      _id: intentId,
+      providerOrderId: { $exists: false },
+      status: { $in: ['CREATED', 'ORDER_PENDING'] },
+      $or: [{ orderLeaseUntil: { $exists: false } }, { orderLeaseUntil: { $lte: now } }],
+    },
+    {
+      $set: {
+        status: 'ORDER_PENDING',
+        orderLeaseToken: token,
+        orderLeaseUntil: new Date(now.getTime() + 60_000),
+        nextAttemptAt: new Date(now.getTime() + 60_000),
+      },
+      $inc: { orderAttempts: 1 },
+    },
+    { returnDocument: 'after' },
+  );
+  if (!intent) return;
   const merchant = await MerchantAccount.findById(intent.merchantAccountId);
-  if (!merchant || merchant.status !== 'ACTIVE') return;
-  const credentials = credentialsFor(merchant);
+  if (!merchant || merchant.status !== 'ACTIVE') {
+    await PaymentIntent.updateOne(
+      { _id: intent._id, orderLeaseToken: token },
+      {
+        $set: { status: 'RECONCILE', lastErrorCode: 'MERCHANT_INACTIVE' },
+        $unset: { orderLeaseToken: 1, orderLeaseUntil: 1 },
+      },
+    );
+    return;
+  }
   const receipt = String(intent._id);
   let orderId: string | undefined;
   let errorCode: string | undefined;
   try {
+    const credentials = credentialsFor(merchant);
     // A previous attempt may have succeeded remotely before the local write was lost.
-    if (intent.orderAttempts > 0)
-      orderId = (await paymentGateway().findOrderByReceipt(credentials, receipt))?.id;
-    orderId ??= (
-      await paymentGateway().createOrder(credentials, {
-        amountMinor: intent.amountMinor,
-        currency: intent.currency,
-        receipt,
-        notes: { intentId: receipt, organizationId: String(intent.organizationId) },
-      })
-    ).id;
+    let order = await paymentGateway().findOrderByReceipt(credentials, receipt);
+    if (!order && intent.expiresAt && intent.expiresAt <= now) {
+      await PaymentIntent.updateOne(
+        { _id: intent._id, orderLeaseToken: token },
+        { $set: { status: 'CANCELLED' }, $unset: { orderLeaseToken: 1, orderLeaseUntil: 1 } },
+      );
+      return;
+    }
+    order ??= await paymentGateway().createOrder(credentials, {
+      amountMinor: intent.amountMinor,
+      currency: intent.currency,
+      receipt,
+      notes: { intentId: receipt, organizationId: String(intent.organizationId) },
+    });
+    if (
+      order.amountMinor !== intent.amountMinor ||
+      order.currency !== intent.currency ||
+      (order.receipt && order.receipt !== receipt)
+    ) {
+      await PaymentIntent.updateOne(
+        { _id: intent._id, orderLeaseToken: token },
+        {
+          $set: { status: 'RECONCILE', lastErrorCode: 'ORDER_MISMATCH' },
+          $unset: { orderLeaseToken: 1, orderLeaseUntil: 1 },
+        },
+      );
+      return;
+    }
+    orderId = order.id;
   } catch (error) {
-    if (!(error instanceof GatewayUnavailableError || error instanceof GatewayRejectedError))
+    if (!(
+      error instanceof GatewayUnavailableError ||
+      error instanceof GatewayRejectedError ||
+      error instanceof ApiError
+    ))
       throw error;
     errorCode = error instanceof GatewayRejectedError ? error.code : 'GATEWAY_UNAVAILABLE';
   }
   await PaymentIntent.updateOne(
-    { _id: intent._id, providerOrderId: { $exists: false } },
+    { _id: intent._id, orderLeaseToken: token, providerOrderId: { $exists: false } },
     orderId
       ? {
           $set: { providerOrderId: orderId, status: 'READY' },
-          $unset: { lastErrorCode: 1, nextAttemptAt: 1 },
+          $unset: { lastErrorCode: 1, nextAttemptAt: 1, orderLeaseToken: 1, orderLeaseUntil: 1 },
         }
       : {
           $set: {
-            status: 'ORDER_PENDING',
+            status: intent.orderAttempts >= 10 ? 'RECONCILE' : 'ORDER_PENDING',
             lastErrorCode: errorCode,
             nextAttemptAt: new Date(Date.now() + Math.min(2 ** intent.orderAttempts, 60) * 30_000),
           },
-          $inc: { orderAttempts: 1 },
+          $unset: { orderLeaseToken: 1, orderLeaseUntil: 1 },
         },
   );
 }
@@ -724,8 +774,11 @@ export async function processRefunds(limit = 25): Promise<number> {
 /** Retries provider-order creation for intents whose earlier attempt had an unknown outcome. */
 export async function retryPendingOrders(limit = 25): Promise<number> {
   const rows = await PaymentIntent.find({
-    status: 'ORDER_PENDING',
-    nextAttemptAt: { $lte: new Date() },
+    status: { $in: ['CREATED', 'ORDER_PENDING'] },
+    $and: [
+      { $or: [{ nextAttemptAt: { $exists: false } }, { nextAttemptAt: { $lte: new Date() } }] },
+      { $or: [{ orderLeaseUntil: { $exists: false } }, { orderLeaseUntil: { $lte: new Date() } }] },
+    ],
     orderAttempts: { $lt: 10 },
   })
     .select({ _id: 1 })

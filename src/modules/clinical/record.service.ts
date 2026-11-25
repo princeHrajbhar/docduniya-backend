@@ -93,12 +93,12 @@ export async function recordFact(
     key,
     input,
     async (session) => {
-      const { registration, practitioner } = await authorizeClinical(
+      const { registration, practitioner, facilityId } = await authorizeClinical(
         actor,
         organizationId,
         patientId,
         'clinical.write',
-        { session },
+        { session, record: { encounterId: input.encounterId } },
       );
       if (
         input.encounterId &&
@@ -113,6 +113,7 @@ export async function recordFact(
         organizationId,
         patientId,
         patientRegistrationId: registration._id,
+        facilityId,
         encounterId: input.encounterId,
         provenance: provenance(actor, input.source),
         ...factFields(input, practitioner._id),
@@ -164,7 +165,7 @@ export async function updateFact(
         organizationId,
         String(row.patientId),
         'clinical.write',
-        { session },
+        { session, record: row },
       );
       if (['ENTERED_IN_ERROR'].includes(row.verificationStatus ?? row.status))
         conflict('This record was entered in error');
@@ -238,6 +239,7 @@ export async function recordObservation(
         organizationId,
         patientId: encounter.patientId,
         patientRegistrationId: encounter.patientRegistrationId,
+        facilityId: encounter.facilityId,
         encounterId,
         provenance: { ...provenance(actor), effectiveAt: new Date(input.effectiveAt) },
         category: input.category,
@@ -305,6 +307,7 @@ export async function createNote(
             organizationId,
             patientId: encounter.patientId,
             patientRegistrationId: encounter.patientRegistrationId,
+            facilityId: encounter.facilityId,
             encounterId,
             provenance: provenance(actor),
             noteType: input.noteType,
@@ -352,7 +355,7 @@ export async function updateNote(
       organizationId,
       String(note.patientId),
       'clinical.write',
-      { session },
+      { session, record: note },
     );
     if (note.status !== 'DRAFT') conflict('Signed notes are corrected by amendment');
     if (String(note.authorId) !== String(practitioner._id))
@@ -382,7 +385,7 @@ export async function addAddendum(
       organizationId,
       String(original.patientId),
       'clinical.write',
-      { session },
+      { session, record: original },
     );
     const [note] = await ClinicalNote.create(
       [
@@ -391,6 +394,7 @@ export async function addAddendum(
           organizationId,
           patientId: original.patientId,
           patientRegistrationId: original.patientRegistrationId,
+          facilityId: original.facilityId,
           encounterId: original.encounterId,
           provenance: provenance(actor),
           noteType: 'ADDENDUM',
@@ -454,6 +458,7 @@ export async function createDiagnosis(
             organizationId,
             patientId: encounter.patientId,
             patientRegistrationId: encounter.patientRegistrationId,
+            facilityId: encounter.facilityId,
             encounterId,
             provenance: provenance(actor),
             ...input,
@@ -511,10 +516,10 @@ export async function createPrescription(
             organizationId,
             patientId: encounter.patientId,
             patientRegistrationId: encounter.patientRegistrationId,
+            facilityId: encounter.facilityId,
             encounterId,
             provenance: provenance(actor),
             prescriberId: practitioner._id,
-            facilityId: encounter.facilityId,
             validUntil: new Date(Date.now() + input.validDays * 86400_000),
             itemCount: input.items.length,
             patientSnapshot: {
@@ -531,6 +536,7 @@ export async function createPrescription(
           organizationId,
           patientId: encounter.patientId,
           patientRegistrationId: encounter.patientRegistrationId,
+          facilityId: encounter.facilityId,
           encounterId,
           provenance: provenance(actor),
           prescriptionId: prescription!._id,
@@ -602,7 +608,7 @@ export async function signRecord(
       organizationId,
       String(row.patientId),
       permission,
-      { session },
+      { session, record: row },
     );
     if (row.status !== 'DRAFT') conflict('Only drafts can be signed');
     const authorId = type === 'prescription' ? row.prescriberId : row.authorId;
@@ -719,7 +725,7 @@ export async function amendNote(
         organizationId,
         String(note.patientId),
         'clinical.sign',
-        { session },
+        { session, record: note },
       );
       if (!['SIGNED', 'AMENDED'].includes(note.status))
         conflict('Only signed notes can be amended');
@@ -782,6 +788,7 @@ export async function markEnteredInError(
     if (!row) conflict();
     await authorizeClinical(actor, organizationId, String(row.patientId), 'clinical.sign', {
       session,
+      record: row,
     });
     if (type === 'prescription') {
       const items = await PrescriptionItem.find({ prescriptionId: id }).session(session);
@@ -843,7 +850,7 @@ export async function stopPrescriptionItem(
         organizationId,
         String(item.patientId),
         'prescriptions.write',
-        { session },
+        { session, record: item },
       );
       if (item.status !== 'ACTIVE') conflict('Only active items can be stopped');
       item.set({
@@ -895,6 +902,7 @@ export async function releaseNote(
       );
       await authorizeClinical(actor, organizationId, String(note.patientId), 'clinical.sign', {
         session,
+        record: note,
       });
       if (!['SIGNED', 'AMENDED'].includes(note.status))
         conflict('Only signed notes can be released');

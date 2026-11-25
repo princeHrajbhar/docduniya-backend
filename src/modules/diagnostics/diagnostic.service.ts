@@ -19,7 +19,7 @@ import { PERMISSIONS } from '../admin/auth/roles/permission.constants.js';
 import { Facility } from '../organizations/organization.model.js';
 import { PatientRegistration } from '../patients/patient.model.js';
 import { recordChange, recordRead } from '../operations/operation.service.js';
-import { ownPractitioner } from '../clinical/clinical.policy.js';
+import { currentClinicalCredential, ownPractitioner } from '../clinical/clinical.policy.js';
 import { encounterForWrite } from '../clinical/encounter.service.js';
 import { Observation } from '../clinical/clinical.model.js';
 import { observationValueFields } from '../clinical/record.service.js';
@@ -70,6 +70,9 @@ async function authorizeLab(
     'DOCTOR',
     'NURSE',
   ]);
+  // Verifying (releasing) results is a licensed act: it needs a current credential.
+  if (permission === 'diagnostics.verify')
+    await currentClinicalCredential(actor, organizationId, facilityId, session);
   return { scope, practitioner };
 }
 
@@ -503,6 +506,7 @@ export async function createReport(
         organizationId,
         patientId: first.patientId,
         patientRegistrationId: first.patientRegistrationId,
+        facilityId: first.performingFacilityId,
         encounterId: first.encounterId,
         provenance: {
           source: 'CLINICIAN',

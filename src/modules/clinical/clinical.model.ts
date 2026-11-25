@@ -49,6 +49,8 @@ const custody = {
   organizationId: ref('Organization'),
   patientId: ref('Patient'),
   patientRegistrationId: ref('PatientRegistration'),
+  /** Facility holding the record; drives branch-restricted access. */
+  facilityId: ref('Facility'),
   encounterId: ref('Encounter', false),
   provenance: { type: provenanceSchema, required: true },
 };
@@ -132,6 +134,9 @@ const careTeamSchema = new Schema(
     organizationId: ref('Organization'),
     patientId: ref('Patient'),
     patientRegistrationId: ref('PatientRegistration'),
+    facilityId: ref('Facility', false),
+    membershipValidFrom: Date,
+    authorizationFence: { type: Number, default: 0 },
     visitId: ref('Visit', false),
     practitionerId: ref('Practitioner'),
     userId: ref('User'),
@@ -381,7 +386,6 @@ const prescriptionSchema = clinical({
   number: text(40),
   prescriberId: ref('Practitioner'),
   registrationId: ref('ProfessionalRegistration', false),
-  facilityId: ref('Facility'),
   issuedAt: Date,
   validUntil: Date,
   ...head,
@@ -453,6 +457,11 @@ const prescriptionItemSchema = clinical({
   stoppedAt: Date,
   /** Cumulative supplied quantity, maintained only by finalized dispenses under the item guard. */
   dispensedQuantity: { type: Number, default: 0, min: 0 },
+  fulfillmentStatus: {
+    type: String,
+    enum: ['UNFILLED', 'PARTIAL', 'FULFILLED'],
+    default: 'UNFILLED',
+  },
 });
 prescriptionItemSchema.index(
   { organizationId: 1, prescriptionId: 1, lineNumber: 1 },
@@ -483,6 +492,7 @@ const revisionSchema = new Schema(
   {
     organizationId: ref('Organization'),
     patientId: ref('Patient'),
+    facilityId: ref('Facility', false),
     resource: {
       type: new Schema(
         {

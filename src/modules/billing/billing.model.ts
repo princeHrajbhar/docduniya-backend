@@ -265,6 +265,8 @@ const intentSchema = new Schema(
     },
     outcome: { type: String, enum: ['CONFIRMED', 'INVOICE_PAID', 'REFUND_REQUIRED'] },
     orderAttempts: { type: Number, default: 0 },
+    orderLeaseToken: String,
+    orderLeaseUntil: Date,
     nextAttemptAt: Date,
     lastErrorCode: { type: String, maxlength: 100 },
     expiresAt: Date,
@@ -288,7 +290,7 @@ const paymentSchema = new Schema(
     providerPaymentId: { type: String, maxlength: 100 },
     method: {
       type: String,
-      enum: ['GATEWAY', 'CASH', 'BANK_TRANSFER', 'CHEQUE', 'UPI_OFFLINE'],
+      enum: ['GATEWAY', 'CASH', 'BANK_TRANSFER', 'CHEQUE', 'UPI_OFFLINE', 'INSURANCE'],
       required: true,
     },
     status: { type: String, enum: ['CAPTURED', 'FAILED'], required: true },

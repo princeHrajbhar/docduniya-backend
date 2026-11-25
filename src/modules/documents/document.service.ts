@@ -46,7 +46,7 @@ async function authorizeCustodian(
     return authorizePatient(
       actor,
       String(custody.patientId),
-      'profile.update',
+      'medical.upload',
       session,
       Boolean(session),
     );
@@ -79,7 +79,7 @@ export async function createUploadIntent(
       let subjectPatientId: string | undefined;
       let patientRegistrationId: string | undefined;
       if (input.custody.kind === 'PATIENT') {
-        await authorizePatient(actor, input.custody.patientId, 'profile.update', session, true);
+        await authorizePatient(actor, input.custody.patientId, 'medical.upload', session, true);
         custody = { kind: 'PATIENT', patientId: input.custody.patientId };
         subjectPatientId = input.custody.patientId;
       } else if (input.custody.kind === 'ORGANIZATION') {
@@ -245,7 +245,7 @@ export async function scanQuarantinedDocuments(limit = 10): Promise<number> {
     const store = privateStore();
     const actor = serviceActor('document-scanner', randomUUID());
     let outcome:
-      | { status: 'CLEAN'; sha256: string; engine: string; engineVersion: string }
+      | { status: 'CLEAN'; content: Buffer; sha256: string; engine: string; engineVersion: string }
       | { status: 'REJECTED'; reason: string }
       | { status: 'RETRY' };
     try {
@@ -260,6 +260,7 @@ export async function scanQuarantinedDocuments(limit = 10): Promise<number> {
           verdict.status === 'CLEAN'
             ? {
                 status: 'CLEAN',
+                content: Buffer.from(content),
                 sha256: createHash('sha256').update(content).digest('hex'),
                 engine: verdict.engine,
                 engineVersion: verdict.version,
@@ -276,7 +277,9 @@ export async function scanQuarantinedDocuments(limit = 10): Promise<number> {
     if (outcome.status === 'CLEAN') {
       availableKey = `available/${document._id}/v${document.versionCount + 1}-${randomUUID()}`;
       try {
-        objectVersion = (await store.copy(pending.key, availableKey)).versionId;
+        objectVersion = (
+          await store.putImmutable(availableKey, outcome.content, pending.expectedMimeType)
+        ).versionId;
       } catch (error) {
         logger.warn({ err: error }, 'Document promotion deferred');
         outcome = { status: 'RETRY' };
@@ -366,7 +369,7 @@ async function authorizeRead(actor: CommandActor, document: DocumentRow, purpose
   const custody = document.custody;
   const subject = document.subjectPatientId ? String(document.subjectPatientId) : undefined;
   if (custody.kind === 'PATIENT') {
-    await authorizePatient(actor, String(custody.patientId), 'profile.read');
+    await authorizePatient(actor, String(custody.patientId), 'medical.read');
     return;
   }
   if (custody.kind === 'USER') {
@@ -387,11 +390,16 @@ async function authorizeRead(actor: CommandActor, document: DocumentRow, purpose
   const organizationId = String(custody.organizationId);
   if (purpose === 'PATIENT_ACCESS') {
     if (!subject || !document.releasedToPatientAt) throw ApiError.notFound();
-    await authorizePatient(actor, subject, 'profile.read');
+    await authorizePatient(actor, subject, 'medical.read');
+    return;
+  }
+  if (!subject) {
+    // Organization records without a patient subject (contracts, licences) are administrative.
+    await authorizeOrganization(actor, organizationId, 'documents.read', { activeProvider: true });
     return;
   }
   try {
-    await authorizeClinical(actor, organizationId, subject!, 'documents.read');
+    await authorizeClinical(actor, organizationId, subject, 'documents.read');
     return;
   } catch (error) {
     if (!(error instanceof ApiError)) throw error;
@@ -403,12 +411,21 @@ async function authorizeRead(actor: CommandActor, document: DocumentRow, purpose
   for (const membership of memberships) {
     const recipient = String(membership.organizationId);
     if (recipient === organizationId) continue;
-    const grant = subject
-      ? await activeGrant(subject, { organizationId: recipient }, 'documents')
-      : null;
+    const grant = await activeGrant(subject, { organizationId: recipient }, 'documents');
     if (!grant) continue;
-    await authorizeOrganization(actor, recipient, 'documents.read', { activeProvider: true });
-    return;
+    // The consent's record period and purposes bound what it discloses.
+    const recordedAt = document.createdAt;
+    if (grant.recordPeriodStart && recordedAt < grant.recordPeriodStart) continue;
+    if (grant.recordPeriodEnd && recordedAt >= grant.recordPeriodEnd) continue;
+    if (!grant.purpose.split(',').includes(purpose)) continue;
+    // Only the recipient's treating clinicians read shared clinical documents, never its
+    // administrators: clinical permission, local registration and a care relationship.
+    try {
+      await authorizeClinical(actor, recipient, subject, 'clinical.read');
+      return;
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+    }
   }
   throw ApiError.notFound();
 }
@@ -584,7 +601,7 @@ export async function listPatientDocuments(
   patientId: string,
   query: z.infer<typeof documentQuery>,
 ) {
-  await authorizePatient(actor, patientId, 'profile.read');
+  await authorizePatient(actor, patientId, 'medical.read');
   const rows = await ClinicalDocument.find({
     $or: [
       { 'custody.patientId': patientId },

@@ -16,6 +16,7 @@ import {
   Specialty,
 } from '../practitioners/practitioner.model.js';
 import { DoctorVerificationCase } from './provider.model.js';
+import { flagUpcomingForReassignment } from '../appointments/reassignment.service.js';
 import { ownDoctor, independentDoctorReviewer } from './provider.policy.js';
 import type {
   verificationSubmission,
@@ -358,6 +359,8 @@ export async function restrictDoctor(
     doctor.verifiedUntil = undefined;
     doctor.updatedBy = { kind: 'USER', id: actor.userId };
     await doctor.save({ session });
+    if (input.status === 'SUSPENDED')
+      await flagUpcomingForReassignment(actor, doctor.practitionerId, session);
     await recordChange(
       actor,
       {

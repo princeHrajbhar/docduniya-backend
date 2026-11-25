@@ -3,6 +3,7 @@ import { ApiError } from '../../utils/api-error.js';
 import { User } from '../admin/auth/models/user.model.js';
 import type { Permission } from '../admin/auth/roles/permission.constants.js';
 import { getRolePermissions } from '../admin/auth/roles/role.service.js';
+import { requireMfaForPrivilege } from '../admin/auth/mfa/mfa.service.js';
 
 /** Platform review authority never implies provider membership or patient access. */
 export async function requirePlatformPermission(
@@ -15,4 +16,5 @@ export async function requirePlatformPermission(
   if (!user || !(await getRolePermissions(user.role)).includes(permission)) {
     throw ApiError.forbidden('Insufficient platform permissions');
   }
+  await requireMfaForPrivilege(actor.userId);
 }

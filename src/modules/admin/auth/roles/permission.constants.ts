@@ -9,7 +9,9 @@ export const PERMISSIONS = {
   BLOG_CATEGORIES_MANAGE: 'blog-categories.manage',
   PROVIDERS_VERIFY: 'providers.verify',
   DOCTORS_VERIFY: 'doctors.verify',
+  PROFESSIONALS_VERIFY: 'professionals.verify',
   PATIENT_RELATIONSHIPS_VERIFY: 'patient-relationships.verify',
+  PATIENT_IDENTITY_MANAGE: 'patient-identity.manage',
   MERCHANTS_VERIFY: 'merchants.verify',
   CATALOG_MANAGE: 'catalog.manage',
   COMMERCE_MANAGE: 'commerce.manage',
@@ -52,8 +54,18 @@ export const PERMISSION_GROUPS = [
     module: 'Privacy',
   },
   {
+    key: PERMISSIONS.PATIENT_IDENTITY_MANAGE,
+    label: 'Duplicate patient identity review and merge',
+    module: 'Privacy',
+  },
+  {
     key: PERMISSIONS.DOCTORS_VERIFY,
     label: 'Doctor credential review and restrictions',
+    module: 'Provider onboarding',
+  },
+  {
+    key: PERMISSIONS.PROFESSIONALS_VERIFY,
+    label: 'Nurse, pharmacist and laboratory credential review',
     module: 'Provider onboarding',
   },
   { key: PERMISSIONS.MERCHANTS_VERIFY, label: 'Payment merchant activation', module: 'Finance' },

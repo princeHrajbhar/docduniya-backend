@@ -14,6 +14,8 @@ import { Refund, Payment, PaymentIntent } from '../billing/billing.model.js';
 import { ClinicalDocument } from '../documents/document.model.js';
 import { Membership } from '../access/access.model.js';
 import { Notification, NotificationTemplate } from './notification.model.js';
+import { WaitlistEntry } from '../appointments/waitlist.model.js';
+import { Conversation } from '../messaging/messaging.model.js';
 
 /** Approved built-in templates. External channels never carry clinical narrative. */
 export const BUILTIN_TEMPLATES = [
@@ -63,6 +65,18 @@ export const BUILTIN_TEMPLATES = [
     code: 'MEMBERSHIP_INVITED',
     subject: 'Invitation to join {{provider}}',
     body: 'You have been invited to join {{provider}} on DocDuniya. Sign in to respond.',
+    allowedVariables: ['provider'],
+  },
+  {
+    code: 'WAITLIST_OFFER',
+    subject: 'An earlier appointment is available',
+    body: 'An earlier slot with {{provider}} is available at {{startAt}}. Accept it in DocDuniya within 30 minutes.',
+    allowedVariables: ['provider', 'startAt'],
+  },
+  {
+    code: 'NEW_MESSAGE',
+    subject: 'New message from {{provider}}',
+    body: 'You have a new secure message from {{provider}}. Sign in to DocDuniya to read it.',
     allowedVariables: ['provider'],
   },
   {
@@ -332,6 +346,49 @@ export async function notificationConsumer(
         template: 'MEMBERSHIP_INVITED',
         source: { type: 'membership', id: event.aggregateId },
         variables: { provider: await providerName(event.organizationId, session) },
+        dedupe: event.eventId,
+        email: true,
+      },
+      session,
+    );
+    return;
+  }
+  if (event.type === 'WaitlistSlotOffered') {
+    const entry = await WaitlistEntry.findById(event.aggregateId).session(session);
+    if (!entry || entry.status !== 'OFFERED' || !entry.offerStartAt) return;
+    await queue(
+      {
+        userId: String(entry.requestedBy),
+        organizationId: String(entry.organizationId),
+        patientId: String(entry.patientId),
+        template: 'WAITLIST_OFFER',
+        source: { type: 'waitlistEntry', id: event.aggregateId },
+        variables: {
+          provider: await providerName(String(entry.organizationId), session),
+          startAt: indianTime(entry.offerStartAt),
+        },
+        dedupe: event.eventId,
+        email: true,
+      },
+      session,
+    );
+    return;
+  }
+  if (event.type === 'ProviderMessagePosted') {
+    const conversation = await Conversation.findById(event.aggregateId).session(session);
+    const userId = conversation
+      ? await patientUser(String(conversation.patientId), session)
+      : undefined;
+    if (!conversation || !userId) return;
+    // The message body never leaves the platform; the notification only says one arrived.
+    await queue(
+      {
+        userId,
+        organizationId: String(conversation.organizationId),
+        patientId: String(conversation.patientId),
+        template: 'NEW_MESSAGE',
+        source: { type: 'conversation', id: event.aggregateId },
+        variables: { provider: await providerName(String(conversation.organizationId), session) },
         dedupe: event.eventId,
         email: true,
       },

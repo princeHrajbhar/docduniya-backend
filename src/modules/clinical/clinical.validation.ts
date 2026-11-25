@@ -27,6 +27,7 @@ export const encounterInput = z
     visitId: objectId.optional(),
     visitType: z.enum(['OUTPATIENT', 'EMERGENCY', 'TELEHEALTH']).optional(),
     appointmentId: objectId.optional(),
+    queueEntryId: objectId.optional(),
     type: conceptInput,
     mode: z.enum(['IN_PERSON', 'VIDEO', 'AUDIO']).default('IN_PERSON'),
     chiefComplaint: longText(2000),

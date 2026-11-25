@@ -34,6 +34,7 @@ import {
   startDatabase,
   stopDatabase,
   verifiedDoctor,
+  walkIn,
   type Identity,
 } from './support.js';
 
@@ -54,8 +55,9 @@ class MemoryStore implements PrivateObjectStore {
   async read(key: string) {
     return this.objects.get(key)!.body;
   }
-  async copy(source: string, target: string) {
-    this.objects.set(target, this.objects.get(source)!);
+  async putImmutable(target: string, content: Buffer, mimeType: string) {
+    if (this.objects.has(target)) throw new Error('Immutable key exists');
+    this.objects.set(target, { body: Buffer.from(content), type: mimeType });
     return {};
   }
   async remove(key: string) {
@@ -129,6 +131,7 @@ async function signedPrescription(
     {
       patientId,
       facilityId: hospital.facilityId,
+      queueEntryId: await walkIn(owner, hospital, patientId),
       type: concept('Consultation'),
       mode: 'IN_PERSON',
       chiefComplaint: 'Infection',
@@ -533,6 +536,7 @@ describe('Admission, beds and discharge', () => {
       {
         patientId: first.patientId,
         facilityId: hospital.facilityId,
+        queueEntryId: await walkIn(owner, hospital, first.patientId),
         type: 'EMERGENCY',
         reason: concept('Pneumonia'),
       },
@@ -544,6 +548,7 @@ describe('Admission, beds and discharge', () => {
       {
         patientId: second.patientId,
         facilityId: hospital.facilityId,
+        queueEntryId: await walkIn(owner, hospital, second.patientId),
         type: 'ELECTIVE',
         reason: concept('Observation'),
       },

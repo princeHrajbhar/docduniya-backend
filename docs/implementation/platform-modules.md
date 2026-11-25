@@ -23,6 +23,14 @@ All conventions from the foundation still apply: base path `/api/v1`, `{ success
 | Notifications and events          | `modules/notifications`, `modules/operations` | `notificationTemplates`, `notifications`, `processedEvents` (plus existing `outboxEvents`)                                                                                                                                                                                   |
 | Support and reviews               | `modules/engagement`                          | `supportTickets`, `reviews`                                                                                                                                                                                                                                                  |
 | Provider subscriptions            | `modules/commerce`                            | `subscriptionPlans`, `subscriptions`                                                                                                                                                                                                                                         |
+| Professional credentials          | `modules/practitioners`                       | `professionalCredentialReviews`                                                                                                                                                                                                                                              |
+| Two-factor sign-in                | `modules/admin/auth/mfa`                      | `mfaFactors`, `mfaChallenges`                                                                                                                                                                                                                                                |
+| Intake and concern routing        | `modules/intake`                              | `questionnaires`, `questionnaireAssignments`, `intakeResponses`, `concernMappings`                                                                                                                                                                                           |
+| Waitlist                          | `modules/appointments`                        | `waitlistEntries`                                                                                                                                                                                                                                                            |
+| Secure messaging                  | `modules/messaging`                           | `conversations`, `conversationMessages`                                                                                                                                                                                                                                      |
+| Patient identity merge            | `modules/patients`                            | `patientMergeCases` (plus merge fields on `patients`)                                                                                                                                                                                                                        |
+| Insurance and claims              | `modules/insurance`                           | `payers`, `insuranceCoverages`, `preauthorizations`, `insuranceClaims`, `claimInvoices`                                                                                                                                                                                      |
+| Theatre and procedures            | `modules/procedures`                          | `procedureCases`, `theatreLocks`                                                                                                                                                                                                                                             |
 
 The collection registry is `src/database/foundation.ts`; `npm run db:setup` creates every collection and index listed there.
 
@@ -42,7 +50,7 @@ Organization roles gain the codes needed by the new modules (`src/modules/access
 
 `POST /organizations/:id/memberships/:membershipId/role-assignments` grants an additional role to an active member. Only a solo-practice owner may grant roles to themselves, for example a solo doctor taking the `clinician` role. Clinical actions still require the person's own professional profile and, for prescribing, a current verified doctor credential.
 
-New platform permissions are `merchants.verify`, `catalog.manage`, `commerce.manage`, `support.manage`, `reviews.moderate`, `privacy.manage`, `audit.read` and `operations.manage`. The super-admin role receives them automatically.
+New platform permissions are `merchants.verify`, `catalog.manage`, `commerce.manage`, `support.manage`, `reviews.moderate`, `privacy.manage`, `audit.read`, `operations.manage`, `professionals.verify` (non-doctor credential review) and `patient-identity.manage` (duplicate merges). The super-admin role receives them automatically.
 
 `db:setup` runs an **additive** upgrade for organizations created earlier. It creates the new built-in roles and adds missing template permissions to built-in roles. It never removes a permission or edits custom roles, and it records an audit and outbox event for each change.
 
@@ -59,7 +67,7 @@ New platform permissions are `merchants.verify`, `catalog.manage`, `commerce.man
 ### Billing, Razorpay and the ledger
 
 - **Merchant onboarding:** a provider registers its Razorpay key id with `env:RAZORPAY_*` references to the key secret and webhook secret (never the secrets themselves). An independent platform reviewer (`merchants.verify`, not a member of that provider) activates it; activation fails closed if the deployment lacks the referenced secrets.
-- **Prepaid booking:** `POST /appointments/:id/payment-intents` creates one intent per hold, with the amount taken from the accepted price snapshot. The Razorpay order is created after commit. A timeout leaves the intent `ORDER_PENDING`, and the worker retries after first looking the order up by receipt.
+- **Prepaid booking:** `POST /appointments/:id/payment-intents` creates one intent per hold, with the amount taken from the accepted price snapshot. The Razorpay order is created after commit. Preparation is durable worker work: each attempt takes a persisted lease before any network call, always looks the order up by receipt first, and checks amount and currency. A process that dies after committing the intent, or after Razorpay created the order but before the local write, is recovered by the worker without a second order. Expired intents with no order are cancelled; inactive merchants and repeated failures go to `RECONCILE`.
 - **Webhook:** `POST /webhooks/payments/razorpay/:merchantAccountId` verifies the HMAC over the exact raw bytes before parsing. It stores a deduplicated inbox row containing only identifiers (never card, email or contact fields), acknowledges, then processes. Duplicate or reordered deliveries are harmless. The checkout callback (`POST /payment-intents/:id/verify`) verifies the checkout signature and then fetches the payment from Razorpay; the client never supplies the amount.
 - **Capture processing** confirms only the matching, still-valid hold. It then issues the invoice and allocates the payment, all in one transaction with balanced journals. A capture that arrives after expiry or cancellation is recorded faithfully, marks the appointment `refundRequired`, and reserves a full refund. It never revives the booking.
 - **Invoices:** drafts from appointment price snapshots, manual lines or unbilled charges (for example from dispensing). Issuing assigns a never-reused `INV/<fiscal-year>/<n>` number and posts receivables. Issued invoices are corrected only with credit notes; only drafts can be discarded.
@@ -75,20 +83,21 @@ New platform permissions are `merchants.verify`, `catalog.manage`, `commerce.man
 ### Private documents
 
 - `POST /documents/upload-intents` authorizes custody and creates a pending document with a presigned PUT URL bound to the key, content type and exact length. Custody is one of: the patient (patient uploads), the organization (clinical documents, which need a care relationship) or the user (practitioner credential evidence).
-- `complete-upload` is only a hint: the server checks that the stored object exists and that its size and type match, then quarantines it. The scanner worker reads the bytes, checks the file signature against the declared type, scans with ClamAV (`clamd` INSTREAM), hashes with SHA-256, copies the exact bytes to an immutable available key, records a `documentVersions` entry and deletes the quarantine object. A mismatch or malware rejects the document. **No configured scanner means files stay quarantined.**
+- `complete-upload` is only a hint: the server checks that the stored object exists and that its size and type match, then quarantines it. The scanner worker reads the bytes, checks the file signature against the declared type, scans with ClamAV (`clamd` INSTREAM), hashes with SHA-256, writes **the exact scanned bytes** (never a copy of the still-writable upload key) to a new immutable available key with a create-only condition, records a `documentVersions` entry and deletes the quarantine object. A mismatch or malware rejects the document. **No configured scanner means files stay quarantined.**
 - `POST /documents/:id/access` re-authorizes on every request, writes the audit record **before** issuing a 60-second, version-specific, `attachment` download URL, and returns the content hash.
   - The patient's own uploads are readable by the patient.
   - Provider documents are readable by the treating team, and by the patient once released.
-  - Another provider can read them under a current patient consent grant.
+  - Another provider can read them under a current patient consent grant, only within the grant's record period and purposes, and only by that provider's treating clinicians (clinical permission, local registration and care relationship). The recipient's administrators are never clinical recipients.
   - Credential evidence is readable by the owner and by a credential reviewer for a linked review case.
 - Clinical documents use a separate private bucket (`PRIVATE_DOCUMENTS_BUCKET`). Startup refuses to treat the public media bucket as clinical storage.
 
 ### Clinical records
 
-- **Access rule:** organization permission, plus facility scope, plus the patient's local registration, plus a current care relationship. A care relationship is either a care-team assignment, created when a clinician starts an encounter or is added by the care team, or a reviewed emergency grant. Receptionists, administrators and platform staff cannot read charts. Unrelated colleagues get `404`.
-- Encounters can start without an appointment (walk-ins). Remote encounters require the patient's recorded telemedicine consent. Visits group encounters.
+- **Access rule:** organization permission, plus facility scope, plus the patient's local registration, plus a current care relationship. A care relationship is either a care-team assignment (created when a clinician starts an encounter, when the care team adds a colleague, or when a theatre team is scheduled) or a reviewed emergency grant. Care assignments are bound to the member's current membership: a revoked and re-granted membership does not revive old assignments. Receptionists, administrators and platform staff cannot read charts. Unrelated colleagues get `404`.
+- **Facility rule:** a member restricted to selected facilities reaches only records held at those facilities. The same filter applies to individual reads and to summaries, timelines, encounter lists and diagnostics lists, so an aggregate never shows what an individual read refuses. Every clinical record stores its facility; organization-wide members see the organization's longitudinal chart.
+- **Starting care needs arrival evidence:** a checked-in appointment, a walk-in queue entry recorded by the front desk today (`queueEntryId`), an open visit, an existing care relationship or reviewed emergency access. Otherwise `409 ARRIVAL_REQUIRED`: a clinician cannot open an encounter for an unrelated patient to gain chart access. Admission requests follow the same rule. Remote encounters also require the patient's recorded telemedicine consent. Visits group encounters.
 - **Facts** (allergies, conditions, medication statements, immunizations, observations) save an immutable revision on every confirmed change. The summary reports allergy status as `UNKNOWN` unless allergies are recorded or a signed note says none are known.
-- **Signing:** notes, diagnoses and prescriptions. Signing checks the author, the expected draft version and completeness, then seals a typed canonical-JSON snapshot with a SHA-256 hash in `clinicalRevisions` and an attestation in `recordSignatures`. Revisions and signatures are append-only at the model layer.
+- **Signing:** notes, diagnoses and prescriptions. Signing requires a **current credential**: a doctor's verified registration and eligible affiliation at the record's facility, or an approved, unexpired professional credential for other professions. A suspended or lapsed credential blocks new signatures immediately (`403 CREDENTIAL_INVALID`). Signing then checks the author, the expected draft version and completeness, then seals a typed canonical-JSON snapshot with a SHA-256 hash in `clinicalRevisions` and an attestation in `recordSignatures`. Revisions and signatures are append-only at the model layer.
   - Signed notes change only by amendment (a new signed revision) or by an addendum.
   - Any record can be marked entered-in-error with a reason; the original content is kept.
 - **Prescriptions:** signing requires a currently verified doctor with an eligible affiliation at the encounter facility. It assigns an `RX-` number, snapshots the prescriber's registration and seals every item in the signed snapshot. Items are stopped individually; the signed prescription is never rewritten.
@@ -116,14 +125,16 @@ Amendments create new revisions, keep the original values and alert the orderer 
   - Received goods enter **quarantine**; a pharmacist's quality release moves them to dispensable stock.
   - Recalled or expired batches cannot be dispensed.
   - Transfers post paired movements.
-- **Dispensing:** requires a pharmacist, a signed and unexpired prescription from the same organization, an active item, and a released, unexpired batch of the matching item. A substitution needs permission and a reason. The cumulative quantity may not exceed `quantity × (1 + refills)`. A possible match with an active drug allergy requires a recorded pharmacist override. Dispensing creates a charge item for billing.
+- **Branch scope:** every stock effect (dispense lines, adjustments, transfers, purchase-order destinations, batch release) is authorized at the facility that holds the location, and dispense lines must use a location of the dispensing pharmacy. Balance and low-stock views are limited to the member's facilities.
+- **Dispensing:** requires a pharmacist with a current approved credential, a signed and unexpired prescription from the same organization, an active item, and a released, unexpired batch of the matching item. A substitution needs permission and a reason. The cumulative quantity may not exceed `quantity × (1 + refills)`. A possible match with an active drug allergy requires a recorded pharmacist override. Dispensing creates a charge item for billing.
 - Returns go to quarantine (never straight back to saleable stock) and restore the remaining prescription quantity.
+- Supply and administration are separate facts: dispensing updates `fulfillmentStatus` (`UNFILLED`, `PARTIAL`, `FULFILLED`) and never ends the medication order. A fully dispensed item stays administrable until it is stopped or its prescription lapses.
 
 ### Inpatient care
 
 - **Admission:** a clinician requests an admission, which opens an inpatient or emergency visit. Bed assignment is the occupancy authority, and partial unique indexes allow only one active assignment per bed and per admission. Concurrent assignment of one bed lets exactly one succeed (`BED_UNAVAILABLE`). Gender-restricted beds are checked.
 - **Transfers** end the old assignment, start the new one and update both bed states in one transaction. Vacated beds go to `CLEANING`.
-- **Nursing documentation** (requires care-team membership): medication administration against signed active items, where `GIVEN` needs the actual time, dose, unit and route and other statuses need a reason; corrections as linked entered-in-error events; fluid intake and output with 24-hour totals; vitals as observations.
+- **Nursing documentation** (requires care-team membership): medication administration against signed, unexpired, active items, by a professional with a current credential, where `GIVEN` needs the actual time, dose, unit and route and other statuses need a reason; corrections as linked entered-in-error events; fluid intake and output with 24-hour totals; vitals as observations.
 - **Discharge:** a discharge plan with a checklist. The signed discharge summary and medicine reconciliation are required; optional waivers need a reason. Clinical discharge, physical departure (which frees the bed and closes the visit) and financial status are separate.
 
 ### Notifications, events and workers
@@ -144,6 +155,9 @@ Amendments create new revisions, keep the original values and alert the orderer 
   - task escalation
   - batch expiry
   - subscription renewal
+  - waitlist offers
+  - doctor credential sweep (flags future appointments of suspended or lapsed doctors for reassignment)
+  - professional credential expiry
 - Every job is safe to run on several instances at once.
 
 ### Support, reviews and subscriptions
@@ -165,6 +179,48 @@ Amendments create new revisions, keep the original values and alert the orderer 
 - `GET /patients/:id/export` returns a machine-readable export of the patient's own data.
 - Audit views are scoped by organization, platform and patient. The patient view shows which providers accessed the record, not individual staff identities.
 
+### Professional credentials and two-factor sign-in
+
+- **Non-doctor credentials:** nurses, pharmacists, laboratory and allied professionals submit a declared registration (`POST /professionals/me/credential-reviews`). An independent platform reviewer (`professionals.verify`, not a colleague at the applicant's providers) approves with completed checks and an expiry of at most one year, never beyond the registration. Approval verifies the exact registration version reviewed. Suspension takes effect immediately; the worker expires lapsed approvals. Signing, dispensing, result verification and medication administration require a current credential.
+- **Doctor suspension** also places the doctor's upcoming appointments on the reassignment worklist (`requiresReassignment`), the same flag doctor leave uses; a worker sweep covers verifications that lapse by date.
+- **Two-factor sign-in (TOTP):** `POST /auth/mfa/totp/enroll` returns a secret and `otpauth://` URI; `POST /auth/mfa/totp/activate` proves possession, issues ten single-use recovery codes and signs out every other session. Afterwards password or Google sign-in returns `{ mfaRequired, challengeToken }` instead of a session; `POST /auth/mfa/verify` completes it with a code or a recovery code. Challenges last five minutes, allow five attempts and are single use; a code cannot be replayed within its window. Secrets are sealed with AES-256-GCM (`MFA_ENCRYPTION_KEY`).
+- **Enforcement:** with `MFA_ENFORCE_PRIVILEGED=true`, platform review functions and privileged organization administration (organization management, memberships, role assignment, merchant, refunds, ledger, audit) return `403 MFA_ENROLLMENT_REQUIRED` until the user has enrolled. Because sign-in always demands an enrolled factor, every session of an enrolled user passed the second step.
+
+### Intake questionnaires and concern routing
+
+- Providers (or the platform, as templates) author versioned questionnaires: yes/no, single and multiple choice, text, number and date questions, simple conditions (`enableWhen`) and red-flag answers. Publishing seals a content hash; published versions never change. A published questionnaire is attached to a service offering (`PUT /organizations/:id/offerings/:offeringId/questionnaire`), and `GET /offerings/:id/questionnaire` shows it publicly.
+- The patient (or a representative with medical authority) answers before the visit (`POST /appointments/:id/intake`). Answers are validated against the exact version: unknown, duplicate, inapplicable, mistyped or missing required answers are rejected. Red flags are recorded and the patient is told to seek urgent care. Resubmission supersedes the previous response.
+- Intake is health information: the appointment's clinician or the patient's care team reads it (audited) and marks it reviewed. Administration alone never sees it.
+- **Concern routing** maps patient-described concerns to specialties and an urgency (`ROUTINE`, `URGENT`, `EMERGENCY`). Mappings are proposed and approved by two different platform reviewers. `GET /discovery/concerns?q=` searches them and `POST /discovery/route` returns ranked specialties for discovery. Any emergency concern returns emergency advice and `bookable: false`. Routing suggests which kind of doctor to see; it never diagnoses.
+
+### Waitlist
+
+- A patient joins the waitlist for a service and date range (one active entry per service). The worker offers the earliest free slot to the longest-waiting patient; a partial unique index guarantees one open offer per slot across worker instances. The patient is notified in-app and by email.
+- An offer lasts 30 minutes and reserves nothing. Accepting places a normal hold at the current price, so payment, confirmation and cancellation follow the booking rules. If the slot was taken meanwhile, the patient returns to the queue. Unaccepted offers return to the queue up to three times; entries whose range has passed expire.
+
+### Secure messaging
+
+- Patients message providers they are registered with; providers message their registered patients. `CARE` threads carry health information and are visible to the patient side and to the appointment's clinician or the patient's care team (reads audited). `ADMINISTRATIVE` threads (scheduling, billing) are handled by the front desk.
+- Messages are append-only and limited to 4,000 characters and five attached documents of the same patient. Patients see which side wrote, never individual staff identities. A new provider message notifies the patient without including its content.
+
+### Patient identity merge
+
+- A patient claiming a record a provider created for them, or a provider holding both registrations, requests a merge with evidence. An independent platform reviewer (`patient-identity.manage`) approves with identity checks. Only unclaimed records merge: an account owner's identity is never absorbed into another account.
+- Approval marks the duplicate `MERGED` and lists it on the survivor. Nothing is deleted and every provider's records keep their original references. The patient portal, verified reports and export include records held under merged identities.
+
+### Insurance and claims
+
+- Payers (insurers, TPAs, government schemes, corporate) are a platform catalog. Patients record their own policies, or billing staff record them for registered patients.
+- **Pre-authorization:** billing staff submit a request against a current policy and record the payer's decision (approved, partially approved or denied, never above the request).
+- **Claims:** issued invoices of one patient, each on at most one open claim (unique index), for no more than their outstanding balance or an approved pre-authorization. Adjudication records the approved and disallowed amounts; denial releases the invoices.
+- **Settlement:** the payer's remittance becomes an `INSURANCE` receipt (cash or bank debit, unapplied-receipts credit) allocated to the claim's invoices, so the ledger stays balanced. The disallowed remainder stays on the invoice as the patient's responsibility.
+
+### Theatre and procedures
+
+- The treating clinician (with a current credential) requests a procedure from an encounter, optionally linked to an admission. Theatre coordination (`inpatient.manage`) books a theatre location: concurrent bookings serialize on a per-theatre lock and overlaps return `409`. The team (surgeon, assistant, anaesthetist, scrub and circulating nurses) is assembled and each member gets a care relationship.
+- The WHO Surgical Safety Checklist runs in order: **sign-in** and **time-out** before the surgeon starts, **sign-out** before completion. Each phase must confirm every required item and is recorded by a team member. Only the surgeon starts and completes the case; completion may link a procedure note of the encounter.
+- The theatre board shows times, theatre and status only; clinical detail requires chart access.
+
 ## Configuration
 
 New settings (see `.env.example`):
@@ -178,6 +234,8 @@ New settings (see `.env.example`):
 | `RAZORPAY_*`                                           | Merchant secrets referenced by `env:NAME` from merchant accounts                                           |
 | `PAYMENT_HOLD_MINUTES`                                 | How long a prepaid hold waits for capture (default 15)                                                     |
 | `WORKER_POLL_MS`                                       | Base worker cadence (default 5000)                                                                         |
+| `MFA_ENCRYPTION_KEY`                                   | 32-byte base64 key sealing TOTP secrets; required in production                                            |
+| `MFA_ENFORCE_PRIVILEGED`                               | Require an enrolled authenticator for privileged administration (default `false`)                          |
 
 Configure the Razorpay dashboard webhook URL as `https://<api-host>/api/v1/webhooks/payments/razorpay/<merchantAccountId>` with events `payment.captured`, `payment.authorized`, `order.paid`, `payment.failed`, `refund.processed`, `refund.failed` and `payment.dispute.*`.
 
@@ -187,6 +245,7 @@ Configure the Razorpay dashboard webhook URL as `https://<api-host>/api/v1/webho
 npm run db:setup        # collections, indexes, role upgrade, notification templates
 npm run dev             # API
 npm run worker          # background jobs (separate process)
+npm run openapi         # write docs/api/openapi.json
 npm run typecheck; npm run lint; npm test; npm run test:integration; npm run build
 ```
 
@@ -194,12 +253,15 @@ npm run typecheck; npm run lint; npm test; npm run test:integration; npm run bui
 
 Integration suites run on a temporary MongoDB 8.2.6 replica set with synthetic data, a fake Razorpay gateway, an in-memory private store and a stub scanner:
 
-| Suite                         | Scenarios                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `booking-payments.test.ts`    | 12 concurrent holds → one success; quote change; pay-at-provider through queue token, doctor-only start, completion, invoice, cash receipt and balanced ledger; merchant self-approval refused; forged webhook rejected; duplicate and differently identified webhooks deduplicated; no PII in the inbox; capture confirms booking and issues an allocated invoice; cancellation refund with credit note; capture after expiry becomes a refund obligation; late-cancellation share from the policy snapshot                                                                                                              |
-| `clinical-care.test.ts`       | Receptionist, admin and unrelated colleague denied; allergy `UNKNOWN` by default; signed note immutable; amendment keeps the original revision; hash verification; diagnosis and prescription signing with registration snapshot; patient sees signed and released records only; outbox notifications; emergency access with independent review; consent-scoped sharing and withdrawal; access history; export; diagnostics order → accept → specimen → critical result → verify → non-cancellable critical task → acknowledgement → amendment with preserved values; single invitation notification across relay replays |
-| `hospital-operations.test.ts` | PO second-person approval; over-receipt refused; quarantine and release; allergy override; quantity limit; concurrent last-stock dispense → one success; return to quarantine; charge to invoice; location hierarchy rules; concurrent bed assignment → one success; atomic transfer; care-team gate for nursing; medication administration validation and correction; fluid totals; discharge checklist requires a signed summary; clinical discharge vs departure; document upload verification, signature sniffing, malware rejection, audited short-lived access; subscription uniqueness, grace and suspension       |
-| `api-surface.test.ts`         | Public catalogs with `no-store`; `401` for private routes; idempotency key required; unknown fields rejected; other tenants hidden; patient portal and export over HTTP; unsigned webhook rejected                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Suite                              | Scenarios                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `booking-payments.test.ts`         | 12 concurrent holds → one success; quote change; pay-at-provider through queue token, doctor-only start, completion, invoice, cash receipt and balanced ledger; merchant self-approval refused; forged webhook rejected; duplicate and differently identified webhooks deduplicated; no PII in the inbox; capture confirms booking and issues an allocated invoice; cancellation refund with credit note; capture after expiry becomes a refund obligation; late-cancellation share from the policy snapshot                                                                                                              |
+| `clinical-care.test.ts`            | Receptionist, admin and unrelated colleague denied; allergy `UNKNOWN` by default; signed note immutable; amendment keeps the original revision; hash verification; diagnosis and prescription signing with registration snapshot; patient sees signed and released records only; outbox notifications; emergency access with independent review; consent-scoped sharing and withdrawal; access history; export; diagnostics order → accept → specimen → critical result → verify → non-cancellable critical task → acknowledgement → amendment with preserved values; single invitation notification across relay replays |
+| `hospital-operations.test.ts`      | PO second-person approval; over-receipt refused; quarantine and release; allergy override; quantity limit; concurrent last-stock dispense → one success; return to quarantine; charge to invoice; location hierarchy rules; concurrent bed assignment → one success; atomic transfer; care-team gate for nursing; medication administration validation and correction; fluid totals; discharge checklist requires a signed summary; clinical discharge vs departure; document upload verification, signature sniffing, malware rejection, audited short-lived access; subscription uniqueness, grace and suspension       |
+| `api-surface.test.ts`              | Public catalogs with `no-store`; `401` for private routes; idempotency key required; unknown fields rejected; other tenants hidden; patient portal and export over HTTP; generated OpenAPI contract; unsigned webhook rejected                                                                                                                                                                                                                                                                                                                                                                                            |
+| `verification-regressions.test.ts` | The eight defects of the [verification review](../reviews/implementation-verification-2026-11-24.md#resolution) plus the walk-in self-assignment weakness, each as an attack that must fail and a legitimate path that must work                                                                                                                                                                                                                                                                                                                                                                                          |
+| `mfa.test.ts`                      | Enrollment, activation, second-step sign-in, code replay refused, single-use recovery codes and challenges, enforcement for administrators                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `platform-extensions.test.ts`      | Intake validation, red flags and clinician-only access; two-person concern governance and emergency routing; waitlist offers without double-offering, acceptance and lapsed offers; messaging access by thread kind; identity merge review; insurance claim limits, single open claim, settlement and balanced ledger; theatre overlap and checklist order                                                                                                                                                                                                                                                                |
 
 ## What this does not claim
 
@@ -212,263 +274,19 @@ Integration suites run on a temporary MongoDB 8.2.6 replica set with synthetic d
   - Platform-collected subscription invoicing waits on the commercial model; platform finance records subscription payments.
   - Exact cancellation windows, specialty rules and telemedicine prescribing limits are configuration defaults pending clinical and legal approval.
 - **Credentials and signatures have known limits.**
-  - Only doctors have a credential-review workflow. Nurses, pharmacists and laboratory professionals act on their recorded profession and organization role.
+  - Credential reviews record what a reviewer checked; they are not live registry lookups with councils.
   - Signatures are authenticated attestations, not legally recognized digital signatures.
 - **Clinical scope is incomplete.**
-  - Waitlists, theatre and procedure cases, insurance and claims, nursing assessment scales and the specialist modules in [the hospital dictionary](../architecture/05-data-model-hospital.md) are not implemented.
-  - Medication and allergy checks are data checks, not clinical decision support.
-- **Production readiness is not established.** Backup and restore drills, monitoring, MFA for privileged staff, append-only database roles, load tests and clinical, privacy and legal acceptance are still required before production use.
+  - Nursing assessment scales, care plans, safety incidents, formulary policy, stock reservations and the specialist modules in [the hospital dictionary](../architecture/05-data-model-hospital.md) are not implemented.
+  - Insurance exchange with payers is manual entry of payer decisions and remittances; no payer or TPA integration exists.
+  - Concern routing and intake red flags are governed navigation aids, not triage or clinical decision support. Medication and allergy checks are data checks.
+- **Production readiness is not established.** MFA enforcement is off by default and must be enabled with an encryption key. Backup and restore drills, monitoring, append-only database roles, load tests and clinical, privacy and legal acceptance are still required before production use.
 
-## Route catalog
+## API contract
 
-Generated from the registered routers. All paths are under `/api/v1`. Request schemas live next to each module in `*.validation.ts` and are the source of truth for fields, bounds and enums.
+The machine-readable OpenAPI 3.1 contract is generated from the mounted routers, so it always matches the served API (about 340 paths):
 
-### Booking and scheduling
+- `GET /api/v1/openapi.json` serves it at runtime.
+- `npm run openapi` writes it to [docs/api/openapi.json](../api/openapi.json) for client generation.
 
-| Method | Path                                                                     |
-| ------ | ------------------------------------------------------------------------ |
-| POST   | `/organizations/:organizationId/resources`                               |
-| GET    | `/organizations/:organizationId/resources`                               |
-| POST   | `/organizations/:organizationId/service-offerings`                       |
-| GET    | `/organizations/:organizationId/service-offerings`                       |
-| POST   | `/organizations/:organizationId/service-offerings/:offeringId/prices`    |
-| POST   | `/organizations/:organizationId/service-offerings/:offeringId/state`     |
-| POST   | `/organizations/:organizationId/schedules`                               |
-| GET    | `/organizations/:organizationId/schedules`                               |
-| POST   | `/organizations/:organizationId/schedules/:scheduleId/state`             |
-| POST   | `/doctors/me/time-blocks`                                                |
-| POST   | `/doctors/me/time-blocks/:blockId/cancel`                                |
-| GET    | `/offerings/:offeringId`                                                 |
-| GET    | `/offerings/:offeringId/availability`                                    |
-| POST   | `/appointments/holds`                                                    |
-| GET    | `/me/appointments`                                                       |
-| GET    | `/appointments/:appointmentId`                                           |
-| POST   | `/appointments/:appointmentId/confirm`                                   |
-| POST   | `/appointments/:appointmentId/cancel`                                    |
-| POST   | `/appointments/:appointmentId/reschedule`                                |
-| POST   | `/organizations/:organizationId/appointments/holds`                      |
-| GET    | `/organizations/:organizationId/appointments`                            |
-| GET    | `/organizations/:organizationId/appointments/:appointmentId`             |
-| POST   | `/organizations/:organizationId/appointments/:appointmentId/confirm`     |
-| POST   | `/organizations/:organizationId/appointments/:appointmentId/cancel`      |
-| POST   | `/organizations/:organizationId/appointments/:appointmentId/reschedule`  |
-| POST   | `/organizations/:organizationId/appointments/:appointmentId/check-in`    |
-| POST   | `/organizations/:organizationId/appointments/:appointmentId/no-show`     |
-| POST   | `/organizations/:organizationId/appointments/:appointmentId/start`       |
-| POST   | `/organizations/:organizationId/appointments/:appointmentId/complete`    |
-| POST   | `/organizations/:organizationId/appointments/:appointmentId/discontinue` |
-| POST   | `/organizations/:organizationId/queue`                                   |
-| GET    | `/organizations/:organizationId/queue`                                   |
-| POST   | `/organizations/:organizationId/queue/:entryId/transition`               |
-
-### Billing, payments and ledger
-
-| Method | Path                                                                  |
-| ------ | --------------------------------------------------------------------- |
-| POST   | `/organizations/:organizationId/merchant-accounts`                    |
-| GET    | `/organizations/:organizationId/merchant-accounts`                    |
-| GET    | `/platform/merchant-accounts`                                         |
-| POST   | `/platform/merchant-accounts/:merchantId/decide`                      |
-| POST   | `/organizations/:organizationId/invoices`                             |
-| GET    | `/organizations/:organizationId/invoices`                             |
-| GET    | `/organizations/:organizationId/invoices/:invoiceId`                  |
-| POST   | `/organizations/:organizationId/invoices/:invoiceId/issue`            |
-| POST   | `/organizations/:organizationId/invoices/:invoiceId/discard`          |
-| POST   | `/organizations/:organizationId/invoices/:invoiceId/credit-notes`     |
-| GET    | `/organizations/:organizationId/charges`                              |
-| POST   | `/organizations/:organizationId/payments/offline`                     |
-| GET    | `/organizations/:organizationId/payments`                             |
-| GET    | `/organizations/:organizationId/payments/:paymentId`                  |
-| POST   | `/organizations/:organizationId/payments/:paymentId/allocations`      |
-| POST   | `/organizations/:organizationId/payments/:paymentId/refunds`          |
-| GET    | `/organizations/:organizationId/payment-disputes`                     |
-| GET    | `/organizations/:organizationId/ledger/journals`                      |
-| GET    | `/organizations/:organizationId/ledger/trial-balance`                 |
-| POST   | `/organizations/:organizationId/reconciliations`                      |
-| GET    | `/organizations/:organizationId/reconciliations/:runId`               |
-| POST   | `/organizations/:organizationId/reconciliation-items/:itemId/resolve` |
-| POST   | `/appointments/:appointmentId/payment-intents`                        |
-| GET    | `/payment-intents/:intentId`                                          |
-| POST   | `/payment-intents/:intentId/verify`                                   |
-| GET    | `/patients/:patientId/invoices`                                       |
-| GET    | `/patients/:patientId/invoices/:invoiceId`                            |
-| POST   | `/patients/:patientId/invoices/:invoiceId/payment-intents`            |
-| POST   | `/webhooks/payments/razorpay/:merchantAccountId`                      |
-
-### Access
-
-| Method | Path                                                                        |
-| ------ | --------------------------------------------------------------------------- |
-| GET    | `/organizations/:organizationId/memberships/:membershipId/role-assignments` |
-| POST   | `/organizations/:organizationId/memberships/:membershipId/role-assignments` |
-| POST   | `/organizations/:organizationId/role-assignments/:assignmentId/revoke`      |
-
-### Clinical
-
-| Method | Path                                                                       |
-| ------ | -------------------------------------------------------------------------- |
-| POST   | `/organizations/:organizationId/encounters`                                |
-| GET    | `/organizations/:organizationId/encounters`                                |
-| GET    | `/organizations/:organizationId/encounters/:encounterId`                   |
-| POST   | `/organizations/:organizationId/encounters/:encounterId/finish`            |
-| POST   | `/organizations/:organizationId/visits/:visitId/close`                     |
-| POST   | `/organizations/:organizationId/patients/:patientId/care-team`             |
-| POST   | `/organizations/:organizationId/care-team/:assignmentId/end`               |
-| POST   | `/organizations/:organizationId/encounters/:encounterId/notes`             |
-| POST   | `/organizations/:organizationId/encounters/:encounterId/diagnoses`         |
-| POST   | `/organizations/:organizationId/encounters/:encounterId/observations`      |
-| POST   | `/organizations/:organizationId/encounters/:encounterId/prescriptions`     |
-| POST   | `/organizations/:organizationId/encounters/:encounterId/referrals`         |
-| POST   | `/organizations/:organizationId/clinical-notes/:noteId/draft`              |
-| POST   | `/organizations/:organizationId/clinical-notes/:noteId/amend`              |
-| POST   | `/organizations/:organizationId/clinical-notes/:noteId/addenda`            |
-| POST   | `/organizations/:organizationId/clinical-notes/:noteId/release`            |
-| GET    | `/organizations/:organizationId/prescriptions/:prescriptionId`             |
-| POST   | `/organizations/:organizationId/prescription-items/:itemId/stop`           |
-| POST   | `/organizations/:organizationId/clinical-records/:type/:id/sign`           |
-| POST   | `/organizations/:organizationId/clinical-records/:type/:id/mark-error`     |
-| GET    | `/organizations/:organizationId/clinical-records/:type/:id/revisions`      |
-| POST   | `/organizations/:organizationId/patients/:patientId/allergies`             |
-| POST   | `/organizations/:organizationId/allergies/:id/update`                      |
-| POST   | `/organizations/:organizationId/patients/:patientId/conditions`            |
-| POST   | `/organizations/:organizationId/conditions/:id/update`                     |
-| POST   | `/organizations/:organizationId/patients/:patientId/medication-statements` |
-| POST   | `/organizations/:organizationId/medication-statements/:id/update`          |
-| POST   | `/organizations/:organizationId/patients/:patientId/immunizations`         |
-| POST   | `/organizations/:organizationId/immunizations/:id/update`                  |
-| GET    | `/organizations/:organizationId/patients/:patientId/clinical-summary`      |
-| GET    | `/organizations/:organizationId/patients/:patientId/timeline`              |
-| GET    | `/organizations/:organizationId/patients/:patientId/shared-records`        |
-| POST   | `/organizations/:organizationId/tasks`                                     |
-| GET    | `/organizations/:organizationId/tasks`                                     |
-| POST   | `/organizations/:organizationId/tasks/:taskId/transition`                  |
-| GET    | `/organizations/:organizationId/referrals/incoming`                        |
-| POST   | `/organizations/:organizationId/referrals/:referralId/respond`             |
-| GET    | `/patients/:patientId/clinical-records`                                    |
-
-### Diagnostics
-
-| Method | Path                                                                    |
-| ------ | ----------------------------------------------------------------------- |
-| GET    | `/diagnostic-tests`                                                     |
-| POST   | `/platform/diagnostic-tests`                                            |
-| POST   | `/organizations/:organizationId/encounters/:encounterId/service-orders` |
-| POST   | `/organizations/:organizationId/service-orders/:orderId/transition`     |
-| GET    | `/organizations/:organizationId/lab-worklist`                           |
-| POST   | `/organizations/:organizationId/specimens`                              |
-| POST   | `/organizations/:organizationId/specimens/:specimenId/transition`       |
-| POST   | `/organizations/:organizationId/diagnostic-reports`                     |
-| GET    | `/organizations/:organizationId/diagnostic-reports/:reportId`           |
-| POST   | `/organizations/:organizationId/diagnostic-reports/:reportId/verify`    |
-| POST   | `/organizations/:organizationId/diagnostic-reports/:reportId/amend`     |
-| POST   | `/organizations/:organizationId/imaging-studies`                        |
-| GET    | `/organizations/:organizationId/patients/:patientId/diagnostics`        |
-| GET    | `/patients/:patientId/diagnostic-reports`                               |
-
-### Documents
-
-| Method | Path                                                           |
-| ------ | -------------------------------------------------------------- |
-| POST   | `/documents/upload-intents`                                    |
-| POST   | `/documents/:documentId/complete-upload`                       |
-| POST   | `/documents/:documentId/access`                                |
-| POST   | `/documents/:documentId/links`                                 |
-| GET    | `/me/documents`                                                |
-| GET    | `/patients/:patientId/documents`                               |
-| GET    | `/organizations/:organizationId/documents`                     |
-| POST   | `/organizations/:organizationId/documents/:documentId/release` |
-
-### Privacy, consent and audit
-
-| Method | Path                                                                  |
-| ------ | --------------------------------------------------------------------- |
-| GET    | `/policies`                                                           |
-| POST   | `/platform/policies`                                                  |
-| POST   | `/me/policy-acknowledgements`                                         |
-| POST   | `/patients/:patientId/consents/record-sharing`                        |
-| GET    | `/patients/:patientId/consents`                                       |
-| POST   | `/consents/:consentId/withdraw`                                       |
-| POST   | `/organizations/:organizationId/consents`                             |
-| POST   | `/organizations/:organizationId/patients/:patientId/emergency-access` |
-| GET    | `/organizations/:organizationId/emergency-access`                     |
-| POST   | `/organizations/:organizationId/emergency-access/:grantId/review`     |
-| POST   | `/patients/:patientId/privacy-requests`                               |
-| GET    | `/patients/:patientId/privacy-requests`                               |
-| GET    | `/patients/:patientId/export`                                         |
-| GET    | `/patients/:patientId/access-history`                                 |
-| GET    | `/platform/privacy-requests`                                          |
-| POST   | `/platform/privacy-requests/:requestId/decide`                        |
-| POST   | `/platform/retention-holds`                                           |
-| GET    | `/organizations/:organizationId/audit-events`                         |
-| GET    | `/platform/audit-events`                                              |
-
-### Inpatient and locations
-
-| Method | Path                                                                                  |
-| ------ | ------------------------------------------------------------------------------------- |
-| POST   | `/organizations/:organizationId/locations`                                            |
-| GET    | `/organizations/:organizationId/locations`                                            |
-| POST   | `/organizations/:organizationId/locations/:locationId/state`                          |
-| POST   | `/organizations/:organizationId/admissions`                                           |
-| GET    | `/organizations/:organizationId/admissions`                                           |
-| GET    | `/organizations/:organizationId/bed-board`                                            |
-| POST   | `/organizations/:organizationId/admissions/:admissionId/admit`                        |
-| POST   | `/organizations/:organizationId/admissions/:admissionId/transfer`                     |
-| POST   | `/organizations/:organizationId/admissions/:admissionId/cancel`                       |
-| GET    | `/organizations/:organizationId/admissions/:admissionId/nursing-chart`                |
-| POST   | `/organizations/:organizationId/admissions/:admissionId/medication-administrations`   |
-| POST   | `/organizations/:organizationId/medication-administrations/:administrationId/correct` |
-| POST   | `/organizations/:organizationId/admissions/:admissionId/fluid-balance`                |
-| POST   | `/organizations/:organizationId/admissions/:admissionId/observations`                 |
-| POST   | `/organizations/:organizationId/admissions/:admissionId/discharge-plan`               |
-| POST   | `/organizations/:organizationId/discharge-plans/:planId/checklist`                    |
-| POST   | `/organizations/:organizationId/admissions/:admissionId/clinical-discharge`           |
-| POST   | `/organizations/:organizationId/admissions/:admissionId/depart`                       |
-
-### Pharmacy and stock
-
-| Method | Path                                                                 |
-| ------ | -------------------------------------------------------------------- |
-| GET    | `/drugs`                                                             |
-| POST   | `/platform/drugs`                                                    |
-| POST   | `/organizations/:organizationId/inventory-items`                     |
-| GET    | `/organizations/:organizationId/inventory-items`                     |
-| POST   | `/organizations/:organizationId/suppliers`                           |
-| GET    | `/organizations/:organizationId/suppliers`                           |
-| POST   | `/organizations/:organizationId/purchase-orders`                     |
-| POST   | `/organizations/:organizationId/purchase-orders/:orderId/transition` |
-| POST   | `/organizations/:organizationId/purchase-orders/:orderId/receipts`   |
-| POST   | `/organizations/:organizationId/stock-batches/:batchId/transition`   |
-| POST   | `/organizations/:organizationId/stock-adjustments`                   |
-| POST   | `/organizations/:organizationId/stock-transfers`                     |
-| GET    | `/organizations/:organizationId/stock`                               |
-| GET    | `/organizations/:organizationId/stock/low`                           |
-| POST   | `/organizations/:organizationId/dispenses`                           |
-| POST   | `/organizations/:organizationId/dispenses/:dispenseId/returns`       |
-
-### Notifications, support, reviews, subscriptions, operations
-
-| Method | Path                                                                      |
-| ------ | ------------------------------------------------------------------------- |
-| GET    | `/me/notifications`                                                       |
-| POST   | `/me/notifications/:notificationId/read`                                  |
-| POST   | `/support-tickets`                                                        |
-| GET    | `/me/support-tickets`                                                     |
-| POST   | `/support-tickets/:ticketId/replies`                                      |
-| GET    | `/platform/support-tickets`                                               |
-| POST   | `/platform/support-tickets/:ticketId/transition`                          |
-| POST   | `/reviews`                                                                |
-| GET    | `/doctors/:doctorId/reviews`                                              |
-| GET    | `/platform/reviews`                                                       |
-| POST   | `/platform/reviews/:reviewId/moderate`                                    |
-| POST   | `/organizations/:organizationId/reviews/:reviewId/reply`                  |
-| GET    | `/subscription-plans`                                                     |
-| POST   | `/platform/subscription-plans`                                            |
-| GET    | `/platform/subscriptions`                                                 |
-| POST   | `/platform/subscriptions/:subscriptionId/payments`                        |
-| GET    | `/organizations/:organizationId/subscription`                             |
-| POST   | `/organizations/:organizationId/subscriptions`                            |
-| POST   | `/organizations/:organizationId/subscriptions/:subscriptionId/transition` |
-| GET    | `/platform/outbox/failed`                                                 |
-| POST   | `/platform/outbox/:eventId/replay`                                        |
-| GET    | `/platform/operations/health`                                             |
+It lists every operation with its path parameters, authentication, the `Idempotency-Key` requirement for commands and the shared success and error envelopes. Request schemas live next to each module in `*.validation.ts` and are the source of truth for fields, bounds and enums.

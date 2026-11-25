@@ -18,7 +18,8 @@ import { lockActiveFacility } from '../organizations/organization.repository.js'
 import { Patient, PatientRegistration } from '../patients/patient.model.js';
 import { Practitioner } from '../practitioners/practitioner.model.js';
 import { authorizeClinical } from '../clinical/clinical.policy.js';
-import { ensureCareAssignment } from '../clinical/encounter.service.js';
+import { ensureCareAssignment, requireArrival } from '../clinical/encounter.service.js';
+import { currentProfessionalCredential } from '../practitioners/credential.service.js';
 import {
   CareTeamAssignment,
   ClinicalNote,
@@ -197,6 +198,9 @@ export async function requestAdmission(
         'clinical.write',
         { session, facilityId: input.facilityId, requireCare: false },
       );
+      // Admission follows arrival: a front-desk queue entry (for example an emergency arrival),
+      // an existing care relationship from an encounter, or reviewed emergency access.
+      await requireArrival(actor, organizationId, input, session);
       await lockActiveFacility(organizationId, input.facilityId, session);
       if (
         await Admission.exists({
@@ -248,6 +252,7 @@ export async function requestAdmission(
           patientId: input.patientId,
           patientRegistrationId: String(registration._id),
           visitId: String(visit!._id),
+          facilityId: input.facilityId,
           practitionerId: String(practitioner._id),
           userId: actor.userId,
           roleCode: 'ATTENDING',
@@ -393,7 +398,7 @@ export async function cancelAdmission(
         organizationId,
         String(admission.patientId),
         'clinical.write',
-        { session },
+        { session, facilityId: String(admission.facilityId) },
       );
       if (admission.status !== 'REQUESTED')
         conflict('Admitted patients are discharged, not cancelled');
@@ -465,11 +470,17 @@ export async function recordAdministration(
       status: 'ACTIVE',
     }).session(session);
     if (!item) throw ApiError.notFound('An active prescription item for this patient is required');
+    // Supply (dispensing) and giving a dose are separate facts: a fully dispensed item stays an
+    // active medication order until it is stopped, cancelled or the prescription lapses.
     const prescription = await Prescription.exists({
       _id: item.prescriptionId,
       status: 'SIGNED',
+      $or: [{ validUntil: { $exists: false } }, { validUntil: { $gt: new Date() } }],
     }).session(session);
-    if (!prescription) throw ApiError.notFound('The prescription is not signed');
+    if (!prescription) throw ApiError.notFound('The prescription is not signed or has lapsed');
+    // Giving medicine is a licensed act: nurses and allied staff need a current credential.
+    if (input.status === 'GIVEN' && practitioner.profession !== 'DOCTOR')
+      await currentProfessionalCredential(practitioner, session);
     let checkerId: Types.ObjectId | undefined;
     if (input.checkerUserId) {
       if (input.checkerUserId === actor.userId)
@@ -654,6 +665,7 @@ export async function recordInpatientObservation(
         organizationId,
         patientId: admission.patientId,
         patientRegistrationId: admission.patientRegistrationId,
+        facilityId: admission.facilityId,
         provenance: {
           source: 'CLINICIAN',
           recordedAt: new Date(),
@@ -774,7 +786,7 @@ export async function createDischargePlan(
         organizationId,
         String(admission.patientId),
         'clinical.write',
-        { session },
+        { session, facilityId: String(admission.facilityId) },
       );
       if (admission.status !== 'ADMITTED') conflict('Only admitted patients get a discharge plan');
       const checklist = [

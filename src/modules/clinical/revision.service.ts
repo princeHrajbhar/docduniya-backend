@@ -134,6 +134,7 @@ export function snapshotOf(type: SignableType, row: Document, extra: Record<stri
 type Revisable = Document & {
   organizationId: Types.ObjectId;
   patientId: Types.ObjectId;
+  facilityId?: Types.ObjectId | null;
   currentRevisionId?: Types.ObjectId | null;
   revisionCount: number;
 };
@@ -166,6 +167,7 @@ export async function writeRevision(
         _id: revisionId,
         organizationId: row.organizationId,
         patientId: row.patientId,
+        facilityId: row.facilityId ?? undefined,
         resource: { type, id: row._id },
         revisionNumber,
         previousRevisionId: row.currentRevisionId ?? undefined,

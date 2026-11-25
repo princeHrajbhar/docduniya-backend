@@ -27,6 +27,7 @@ import { User, type UserDocument } from './models/user.model.js';
 import * as otpService from './otp.service.js';
 import { getRolePermissions } from './roles/role.service.js';
 import * as sessionService from './session.service.js';
+import { beginSignIn, type MfaPending } from './mfa/mfa.service.js';
 
 const googleClient = new OAuth2Client();
 
@@ -106,7 +107,7 @@ export async function login(
   email: string,
   password: string,
   meta: SessionMeta,
-): Promise<AuthTokens> {
+): Promise<AuthTokens | MfaPending> {
   const user = await User.findOne({ email }).select('+password');
 
   if (user?.lockedUntil && user.lockedUntil > new Date()) {
@@ -127,10 +128,13 @@ export async function login(
   }
 
   assertCanSignIn(user);
-  return startSession(user, meta, 'User logged in');
+  return beginSignIn(user, meta, () => startSession(user, meta, 'User logged in'));
 }
 
-export async function loginWithGoogle(credential: string, meta: SessionMeta): Promise<AuthTokens> {
+export async function loginWithGoogle(
+  credential: string,
+  meta: SessionMeta,
+): Promise<AuthTokens | MfaPending> {
   if (!env.GOOGLE_CLIENT_ID) {
     throw new AppError('Google sign-in is not configured', 503, ErrorCode.INTERNAL);
   }
@@ -192,7 +196,10 @@ export async function loginWithGoogle(credential: string, meta: SessionMeta): Pr
 
   await otpService.clearSecrets(user.email, ['EMAIL_VERIFICATION']);
   assertCanSignIn(user);
-  return startSession(user, meta, 'User logged in with Google');
+  const signedIn = user;
+  return beginSignIn(signedIn, meta, () =>
+    startSession(signedIn, meta, 'User logged in with Google'),
+  );
 }
 
 function assertCanSignIn(user: Pick<UserDocument, 'isVerified' | 'isActive'>): void {

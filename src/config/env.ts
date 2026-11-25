@@ -70,6 +70,10 @@ const envSchema = z.object({
   RAZORPAY_API_BASE: z.url().default('https://api.razorpay.com/v1'),
   /** Minutes a prepaid appointment hold waits for a verified capture. */
   PAYMENT_HOLD_MINUTES: z.coerce.number().int().min(5).max(30).default(15),
+  /** 32-byte key (base64) encrypting TOTP secrets. Required in production. */
+  MFA_ENCRYPTION_KEY: optionalString,
+  /** Privileged platform and organization administration requires an enrolled second factor. */
+  MFA_ENFORCE_PRIVILEGED: booleanString(false),
 
   // ── Background workers ────────────────────────────────────────────────────
   WORKER_POLL_MS: z.coerce.number().int().min(250).max(60_000).default(5000),

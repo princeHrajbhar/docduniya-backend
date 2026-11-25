@@ -57,12 +57,24 @@ export const updatePatientInput = z.strictObject({
   expectedVersion: version,
   profile: demographicsInput,
 });
-export const relationshipDecisionInput = z.strictObject({
-  expectedVersion: version,
-  decision: z.enum(['ACTIVE', 'REJECTED']),
-  reason: z.string().trim().min(20).max(1000),
-  validUntil: z.iso.datetime().optional(),
-});
+export const relationshipDecisionInput = z
+  .strictObject({
+    expectedVersion: version,
+    decision: z.enum(['ACTIVE', 'REJECTED']),
+    reason: z.string().trim().min(20).max(1000),
+    validUntil: z.iso.datetime().optional(),
+    medicalActions: z
+      .array(z.enum(['medical.read', 'medical.upload', 'medical.export', 'consent.manage']))
+      .max(4)
+      .optional(),
+    medicalAuthorityReference: z.string().trim().min(10).max(500).optional(),
+  })
+  .refine(
+    (v) =>
+      !v.medicalActions?.length ||
+      (v.decision === 'ACTIVE' && Boolean(v.medicalAuthorityReference) && Boolean(v.validUntil)),
+    'Medical representative authority needs explicit evidence and an expiry',
+  );
 export const registrationInput = z.strictObject({
   facilityId: objectId,
   profile: demographicsInput,

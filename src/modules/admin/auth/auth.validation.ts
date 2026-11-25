@@ -97,3 +97,23 @@ export type ResendOtpInput = z.infer<typeof resendOtpSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
+
+export const mfaCodeSchema = z.strictObject({
+  code: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/u),
+});
+export const mfaVerifySchema = z
+  .strictObject({
+    challengeToken: z.string().min(20).max(200),
+    code: z
+      .string()
+      .trim()
+      .regex(/^\d{6}$/u)
+      .optional(),
+    recoveryCode: z.string().trim().min(10).max(20).optional(),
+  })
+  .refine((value) => Boolean(value.code) !== Boolean(value.recoveryCode), {
+    message: 'Provide either an authenticator code or a recovery code',
+  });

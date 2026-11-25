@@ -28,6 +28,9 @@ import * as scheduling from '../../src/modules/scheduling/scheduling.service.js'
 import * as schedulingDto from '../../src/modules/scheduling/scheduling.validation.js';
 import { atIndiaMinute } from '../../src/modules/scheduling/calendar.service.js';
 import { todayInIndia, type CommandActor } from '../../src/shared/domain/healthcare.js';
+import * as credentials from '../../src/modules/practitioners/credential.service.js';
+import { addWalkIn } from '../../src/modules/appointments/queue.service.js';
+import { PatientRegistration } from '../../src/modules/patients/patient.model.js';
 
 export const key = () => randomUUID();
 export const address = {
@@ -174,12 +177,16 @@ export async function staff(
   );
 }
 
-/** Practitioner of a non-doctor profession (nurse, pharmacist, laboratory professional). */
+/**
+ * Practitioner of a non-doctor profession (nurse, pharmacist, laboratory professional). By
+ * default the registration is independently reviewed and approved for 90 days.
+ */
 export async function professional(
   identity: Identity,
   profession: 'NURSE' | 'PHARMACIST' | 'LAB_PROFESSIONAL',
+  options: { credentialed?: boolean } = {},
 ) {
-  return practitioners.createPractitioner(
+  const practitioner = await practitioners.createPractitioner(
     identity.actor,
     practitionerDto.practitionerInput.parse({
       name: { display: `Synthetic ${profession.toLowerCase()}` },
@@ -187,6 +194,66 @@ export async function professional(
     }),
     key(),
   );
+  if (options.credentialed === false) return practitioner;
+  const registration = await practitioners.addCredential(
+    identity.actor,
+    'registrations',
+    practitionerDto.professionalRegistrationInput.parse({
+      authority: 'Synthetic professional council',
+      jurisdiction: 'WB',
+      registrationNumberNormalized: key(),
+      issuedOn: '2015-01-01',
+      expiresOn: todayInIndia(new Date(Date.now() + 365 * 86400_000)),
+      evidenceReference: 'synthetic-registration-evidence',
+    }),
+    key(),
+  );
+  const review = await credentials.submitCredential(
+    identity.actor,
+    {
+      registrationId: registration.id,
+      declaration: 'Synthetic accurate registration declaration.',
+    },
+    key(),
+  );
+  const reviewer = await platformAdmin();
+  await credentials.decideCredential(
+    reviewer.actor,
+    review.id,
+    {
+      expectedVersion: 0,
+      decision: 'APPROVED',
+      reason: 'Independent synthetic review of the registration.',
+      checks: { identityChecked: true, registrationChecked: true },
+      validUntil: new Date(Date.now() + 90 * 86400_000).toISOString(),
+    },
+    key(),
+  );
+  return { ...practitioner, credentialReviewId: review.id };
+}
+
+/** Front-desk arrival for a registered patient; the queue entry anchors a walk-in encounter. */
+export async function walkIn(
+  frontDesk: Identity,
+  site: { organizationId: string; facilityId: string },
+  patientId: string,
+) {
+  const registration = (await PatientRegistration.findOne({
+    organizationId: site.organizationId,
+    patientId,
+    status: 'ACTIVE',
+  }))!;
+  const entry = await addWalkIn(
+    frontDesk.actor,
+    site.organizationId,
+    {
+      facilityId: site.facilityId,
+      patientRegistrationId: String(registration._id),
+      priority: 'ROUTINE',
+    },
+    key(),
+  );
+  return entry.id;
 }
 
 /** Verified, affiliated, published doctor. */

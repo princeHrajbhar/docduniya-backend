@@ -2,8 +2,10 @@ import { Types } from 'mongoose';
 import type { CommandActor } from '../../shared/domain/healthcare.js';
 import { ApiError } from '../../utils/api-error.js';
 import { authorizePatient } from '../patients/patient.service.js';
+import { patientIdentityIds } from '../patients/merge.service.js';
 import { recordRead } from '../operations/operation.service.js';
 import { activeGrant, periodFilter } from '../privacy/grant.service.js';
+import { facilityFilter } from '../../shared/application/scope.js';
 import { authorizeClinical } from '../clinical/clinical.policy.js';
 import { Observation } from '../clinical/clinical.model.js';
 import { normalize } from '../clinical/revision.service.js';
@@ -33,19 +35,34 @@ export async function patientDiagnostics(
   organizationId: string,
   patientId: string,
 ) {
-  await authorizeClinical(actor, organizationId, patientId, 'clinical.read');
-  const [orders, reports] = await Promise.all([
-    ServiceOrder.find({ organizationId, patientId }).sort({ _id: -1 }).limit(100),
-    DiagnosticReport.find({ organizationId, patientId }).sort({ _id: -1 }).limit(50),
-  ]);
+  const access = await authorizeClinical(actor, organizationId, patientId, 'clinical.read');
+  // Branch-restricted members see only orders performed at their facilities, and their reports.
+  const orders = await ServiceOrder.find({
+    organizationId,
+    patientId,
+    ...facilityFilter(access.scope.membership, 'performingFacilityId'),
+  })
+    .sort({ _id: -1 })
+    .limit(100);
+  const restricted = access.scope.membership.facilityScope === 'SELECTED';
+  const reports = await DiagnosticReport.find({
+    organizationId,
+    patientId,
+    ...(restricted ? { serviceOrderIds: { $in: orders.map((row) => row._id) } } : {}),
+  })
+    .sort({ _id: -1 })
+    .limit(50);
   await recordRead(actor, 'diagnostics', patientId, organizationId, patientId);
   return { orders: orders.map(plain), reports: await withResults(reports) };
 }
 
 /** Patient portal: verified reports only, across every performing provider. */
 export async function patientReports(actor: CommandActor, patientId: string) {
-  await authorizePatient(actor, patientId, 'profile.read');
-  const reports = await DiagnosticReport.find({ patientId, ...RELEASED })
+  await authorizePatient(actor, patientId, 'medical.read');
+  const reports = await DiagnosticReport.find({
+    patientId: { $in: await patientIdentityIds(patientId) },
+    ...RELEASED,
+  })
     .sort({ issuedAt: -1 })
     .limit(100);
   await recordRead(actor, 'diagnosticReport.patient', patientId, undefined, patientId);

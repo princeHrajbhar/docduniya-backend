@@ -24,7 +24,14 @@ import { requirePlatformPermission } from '../access/platform-access.js';
 import { PERMISSIONS } from '../admin/auth/roles/permission.constants.js';
 import { recordChange, recordRead, nextMrn } from '../operations/operation.service.js';
 
-type PatientAction = 'profile.read' | 'profile.update' | 'registration.create';
+type PatientAction =
+  | 'profile.read'
+  | 'profile.update'
+  | 'registration.create'
+  | 'medical.read'
+  | 'medical.upload'
+  | 'medical.export'
+  | 'consent.manage';
 export async function authorizePatient(
   actor: CommandActor,
   patientId: string,
@@ -234,6 +241,12 @@ export async function decideRelationship(
           'Active representative authority requires a future review/expiry date',
         );
       relation.status = input.decision;
+      if (input.medicalActions?.length) {
+        relation.allowedActions = [
+          ...new Set([...relation.allowedActions, ...input.medicalActions]),
+        ];
+        relation.medicalAuthorityReference = input.medicalAuthorityReference;
+      }
       relation.validFrom = new Date();
       relation.validUntil = input.validUntil ? new Date(input.validUntil) : undefined;
       relation.verifiedBy = new Types.ObjectId(actor.userId);

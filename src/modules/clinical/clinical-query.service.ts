@@ -4,11 +4,12 @@ import type { CommandActor } from '../../shared/domain/healthcare.js';
 import { ApiError } from '../../utils/api-error.js';
 import { authorizeOrganization } from '../access/access.service.js';
 import { authorizePatient } from '../patients/patient.service.js';
+import { patientIdentityIds } from '../patients/merge.service.js';
 import { Organization } from '../organizations/organization.model.js';
 import { recordRead } from '../operations/operation.service.js';
 import { activeGrant, periodFilter } from '../privacy/grant.service.js';
 import type { ShareableResource } from '../privacy/privacy.model.js';
-import { authorizeClinical, ownPractitioner } from './clinical.policy.js';
+import { authorizeClinical, chartFilter, ownPractitioner } from './clinical.policy.js';
 import {
   Allergy,
   ClinicalNote,
@@ -86,8 +87,8 @@ export async function clinicalSummary(
   organizationId: string,
   patientId: string,
 ) {
-  await authorizeClinical(actor, organizationId, patientId, 'clinical.read');
-  const scope = { organizationId, patientId };
+  const access = await authorizeClinical(actor, organizationId, patientId, 'clinical.read');
+  const scope = chartFilter(access, organizationId, patientId);
   const [allergies, conditions, medications, vitals, encounters, lastNote] = await Promise.all([
     Allergy.find({ ...scope, verificationStatus: { $ne: 'ENTERED_IN_ERROR' } })
       .sort({ _id: -1 })
@@ -135,8 +136,8 @@ export async function clinicalTimeline(
   organizationId: string,
   patientId: string,
 ) {
-  await authorizeClinical(actor, organizationId, patientId, 'clinical.read');
-  const scope = { organizationId, patientId };
+  const access = await authorizeClinical(actor, organizationId, patientId, 'clinical.read');
+  const scope = chartFilter(access, organizationId, patientId);
   const [encounters, notes, diagnoses, prescriptions, observations] = await Promise.all([
     Encounter.find(scope).sort({ _id: -1 }).limit(50),
     ClinicalNote.find(scope).sort({ _id: -1 }).limit(50),
@@ -183,7 +184,9 @@ export async function getPrescription(
 ) {
   const prescription = await Prescription.findOne({ _id: prescriptionId, organizationId });
   if (!prescription) throw ApiError.notFound();
-  await authorizeClinical(actor, organizationId, String(prescription.patientId), 'clinical.read');
+  await authorizeClinical(actor, organizationId, String(prescription.patientId), 'clinical.read', {
+    record: prescription,
+  });
   const items = await PrescriptionItem.find({ prescriptionId }).sort({ lineNumber: 1 });
   await recordRead(
     actor,
@@ -207,7 +210,9 @@ export async function getRevisions(
     'resource.id': id,
   }).sort({ revisionNumber: 1 });
   if (!revisions.length) throw ApiError.notFound();
-  await authorizeClinical(actor, organizationId, String(revisions[0]!.patientId), 'clinical.read');
+  await authorizeClinical(actor, organizationId, String(revisions[0]!.patientId), 'clinical.read', {
+    record: { facilityId: revisions[0]!.facilityId, encounterId: undefined },
+  });
   await recordRead(actor, 'clinicalRevision', id, organizationId, String(revisions[0]!.patientId));
   return revisions.map((revision) => ({
     id: String(revision._id),
@@ -226,24 +231,31 @@ export async function getRevisions(
  * allergies, active problems, immunizations and visit history. Drafts are never shown.
  */
 export async function patientRecords(actor: CommandActor, patientId: string) {
-  await authorizePatient(actor, patientId, 'profile.read');
+  await authorizePatient(actor, patientId, 'medical.read');
+  // Records held under duplicate identities merged into this patient are the patient's too.
+  const identities = { $in: await patientIdentityIds(patientId) };
   const [prescriptions, notes, allergies, conditions, immunizations, encounters] =
     await Promise.all([
-      Prescription.find({ patientId, status: 'SIGNED' }).sort({ issuedAt: -1 }).limit(100),
+      Prescription.find({ patientId: identities, status: 'SIGNED' })
+        .sort({ issuedAt: -1 })
+        .limit(100),
       ClinicalNote.find({
-        patientId,
+        patientId: identities,
         status: { $in: ['SIGNED', 'AMENDED'] },
         releasedToPatientAt: { $exists: true },
       })
         .sort({ signedAt: -1 })
         .limit(100),
-      Allergy.find({ patientId, verificationStatus: { $ne: 'ENTERED_IN_ERROR' } }).limit(100),
+      Allergy.find({
+        patientId: identities,
+        verificationStatus: { $ne: 'ENTERED_IN_ERROR' },
+      }).limit(100),
       Condition.find({
-        patientId,
+        patientId: identities,
         verificationStatus: { $in: ['CONFIRMED', 'PROVISIONAL'] },
       }).limit(100),
-      Immunization.find({ patientId, status: { $ne: 'ENTERED_IN_ERROR' } }).limit(100),
-      Encounter.find({ patientId, status: { $in: ['IN_PROGRESS', 'FINISHED'] } })
+      Immunization.find({ patientId: identities, status: { $ne: 'ENTERED_IN_ERROR' } }).limit(100),
+      Encounter.find({ patientId: identities, status: { $in: ['IN_PROGRESS', 'FINISHED'] } })
         .sort({ startedAt: -1 })
         .limit(100),
     ]);

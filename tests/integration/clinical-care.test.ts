@@ -31,6 +31,7 @@ import {
   startDatabase,
   stopDatabase,
   verifiedDoctor,
+  walkIn,
   type Identity,
 } from './support.js';
 
@@ -67,6 +68,7 @@ async function startCare() {
     {
       patientId,
       facilityId: clinic.facilityId,
+      queueEntryId: await walkIn(owner, clinic, patientId),
       type: concept('Outpatient consultation'),
       mode: 'IN_PERSON',
       chiefComplaint: 'Fever for three days',

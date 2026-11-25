@@ -11,3 +11,18 @@ services:
       NODE_ENV: production
       PORT: 3000
     restart: unless-stopped
+
+  # Background jobs (outbox, payments, notifications, scanning, waitlist, sweeps). Every job is
+  # safe on several instances; scale with `docker compose up --scale worker=2`.
+  worker:
+    image: docduniya-backend
+    depends_on:
+      - api
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+    command: ['node', 'dist/workers/index.js']
+    healthcheck:
+      disable: true
+    restart: unless-stopped

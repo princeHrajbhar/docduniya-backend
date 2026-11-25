@@ -97,6 +97,37 @@ describe('HTTP surface', () => {
     ).toBe(404);
   });
 
+  it('reports readiness only with a replica-set database', async () => {
+    const ready = await request(app).get('/api/v1/health/ready');
+    expect(ready.status).toBe(200);
+    expect(ready.body.status).toBe('ready');
+  });
+
+  it('publishes an OpenAPI contract generated from the mounted routes', async () => {
+    const response = await request(app).get('/api/v1/openapi.json');
+    expect(response.status).toBe(200);
+    const spec = response.body as {
+      openapi: string;
+      paths: Record<
+        string,
+        Record<
+          string,
+          { security: unknown[]; parameters?: Array<{ $ref?: string; name?: string }> }
+        >
+      >;
+    };
+    expect(spec.openapi).toBe('3.1.0');
+    const operations = Object.values(spec.paths).flatMap((path) => Object.keys(path));
+    expect(operations.length).toBeGreaterThan(250);
+    const claim = spec.paths['/organizations/{organizationId}/claims']!.post!;
+    expect(claim.security).toEqual([{ bearerAuth: [] }, { cookieAuth: [] }]);
+    expect(claim.parameters).toContainEqual({ $ref: '#/components/parameters/IdempotencyKey' });
+    expect(claim.parameters).toContainEqual(expect.objectContaining({ name: 'organizationId' }));
+    expect(spec.paths['/discovery/concerns']!.get!.security).toEqual([]);
+    expect(spec.paths['/auth/login']!.post!.parameters).toBeUndefined();
+    expect(spec.paths['/webhooks/payments/razorpay/{merchantAccountId}']).toBeDefined();
+  });
+
   it('rejects unsigned gateway webhooks for unknown merchants', async () => {
     const response = await request(app)
       .post(`/api/v1/webhooks/payments/razorpay/${new Types.ObjectId()}`)

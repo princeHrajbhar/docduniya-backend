@@ -21,7 +21,7 @@ import { authorizeOrganization } from '../access/access.service.js';
 import { requirePlatformPermission } from '../access/platform-access.js';
 import { PERMISSIONS } from '../admin/auth/roles/permission.constants.js';
 import { recordChange } from '../operations/operation.service.js';
-import { ownPractitioner } from '../clinical/clinical.policy.js';
+import { credentialedProfessional } from '../practitioners/credential.service.js';
 import { Allergy, Prescription, PrescriptionItem } from '../clinical/clinical.model.js';
 import { FacilityLocation } from '../locations/location.model.js';
 import { recordCharge } from '../billing/invoice.service.js';
@@ -130,6 +130,37 @@ async function storeLocation(organizationId: string, locationId: string, session
   }).session(session ?? null);
   if (!location) throw ApiError.notFound('Stock location is unavailable');
   return location;
+}
+
+/**
+ * Every stock effect is authorized at the facility that holds the location, so a member
+ * restricted to one branch cannot move another branch's stock by naming its location.
+ */
+async function authorizedLocation(
+  actor: CommandActor,
+  organizationId: string,
+  locationId: string,
+  permission: 'inventory.manage' | 'procurement.manage' | 'pharmacy.dispense',
+  session: ClientSession,
+) {
+  const location = await storeLocation(organizationId, locationId, session);
+  await authorizeOrganization(actor, organizationId, permission, {
+    facilityId: String(location.facilityId),
+    session,
+  });
+  return location;
+}
+
+/** Locations a facility-restricted member may see; undefined means organization-wide. */
+async function visibleLocationIds(scope: Awaited<ReturnType<typeof authorizeOrganization>>) {
+  if (scope.membership.facilityScope !== 'SELECTED') return undefined;
+  const rows = await FacilityLocation.find({
+    organizationId: scope.organization._id,
+    facilityId: { $in: scope.membership.facilityIds },
+  })
+    .select({ _id: 1 })
+    .lean();
+  return rows.map((row) => row._id);
 }
 
 // ── Catalog, items and suppliers ─────────────────────────────────────────────
@@ -322,7 +353,13 @@ export async function createPurchaseOrder(
       ))
     )
       throw ApiError.notFound('Supplier is unavailable');
-    await storeLocation(organizationId, input.destinationId, session);
+    await authorizedLocation(
+      actor,
+      organizationId,
+      input.destinationId,
+      'procurement.manage',
+      session,
+    );
     const items = await InventoryItem.countDocuments({
       _id: { $in: input.lines.map((line) => line.itemId) },
       organizationId,
@@ -553,7 +590,7 @@ export async function actOnBatch(
     input,
     async (session) => {
       await scoped(actor, organizationId, 'inventory.manage', session);
-      await ownPractitioner(actor, session, ['PHARMACIST']);
+      await credentialedProfessional(actor, ['PHARMACIST'], session);
       const batch = await StockBatch.findOne({
         _id: batchId,
         organizationId,
@@ -568,6 +605,14 @@ export async function actOnBatch(
           batchId,
           quarantined: { $gt: 0 },
         }).session(session);
+        for (const balance of balances)
+          await authorizedLocation(
+            actor,
+            organizationId,
+            String(balance.locationId),
+            'inventory.manage',
+            session,
+          );
         for (const balance of balances) {
           await moveStock(
             actor,
@@ -637,7 +682,7 @@ export async function adjustStock(
     await scoped(actor, organizationId, 'inventory.manage', session);
     const batch = await StockBatch.findOne({ _id: input.batchId, organizationId }).session(session);
     if (!batch) throw ApiError.notFound('Batch is unavailable');
-    await storeLocation(organizationId, input.locationId, session);
+    await authorizedLocation(actor, organizationId, input.locationId, 'inventory.manage', session);
     if (input.reason === 'WASTE' && input.quantityDelta > 0)
       throw ApiError.badRequest('Waste reduces stock');
     const movement = await moveStock(
@@ -690,8 +735,20 @@ export async function transferStock(
       status: { $in: ['QUARANTINED', 'RELEASED'] },
     }).session(session);
     if (!batch) throw ApiError.notFound('Batch is unavailable');
-    await storeLocation(organizationId, input.fromLocationId, session);
-    await storeLocation(organizationId, input.toLocationId, session);
+    await authorizedLocation(
+      actor,
+      organizationId,
+      input.fromLocationId,
+      'inventory.manage',
+      session,
+    );
+    await authorizedLocation(
+      actor,
+      organizationId,
+      input.toLocationId,
+      'inventory.manage',
+      session,
+    );
     const base = {
       organizationId,
       itemId: batch.itemId,
@@ -742,10 +799,17 @@ export async function stockBalances(
   organizationId: string,
   query: z.infer<typeof stockQuery>,
 ) {
-  await authorizeOrganization(actor, organizationId, 'inventory.manage');
+  const scope = await authorizeOrganization(actor, organizationId, 'inventory.manage');
+  const visible = await visibleLocationIds(scope);
+  if (query.locationId && visible && !visible.some((id) => String(id) === query.locationId))
+    throw ApiError.notFound('Stock location is unavailable');
   const rows = await StockBalance.find({
     organizationId,
-    ...(query.locationId ? { locationId: query.locationId } : {}),
+    ...(query.locationId
+      ? { locationId: query.locationId }
+      : visible
+        ? { locationId: { $in: visible } }
+        : {}),
     ...(query.itemId ? { itemId: query.itemId } : {}),
     $or: [{ onHand: { $gt: 0 } }, { quarantined: { $gt: 0 } }],
     ...before(query.before),
@@ -786,7 +850,14 @@ export async function stockBalances(
 export async function lowStock(actor: CommandActor, organizationId: string) {
   const scope = await authorizeOrganization(actor, organizationId, 'inventory.manage');
   const totals = await StockBalance.aggregate<{ _id: Types.ObjectId; onHand: number }>([
-    { $match: { organizationId: scope.organization._id } },
+    {
+      $match: {
+        organizationId: scope.organization._id,
+        ...(await visibleLocationIds(scope).then((ids) =>
+          ids ? { locationId: { $in: ids } } : {},
+        )),
+      },
+    },
     { $group: { _id: '$itemId', onHand: { $sum: '$onHand' } } },
   ]);
   const byItem = new Map(totals.map((row) => [String(row._id), row.onHand]));
@@ -829,7 +900,7 @@ export async function dispense(
         facilityId: input.pharmacyFacilityId,
         activeProvider: true,
       });
-      const pharmacist = await ownPractitioner(actor, session, ['PHARMACIST']);
+      const pharmacist = await credentialedProfessional(actor, ['PHARMACIST'], session);
       const prescription = await Prescription.findOne({
         _id: input.prescriptionId,
         organizationId,
@@ -849,6 +920,15 @@ export async function dispense(
       const lines = [];
       const warnings: string[] = [];
       for (const [index, line] of input.lines.entries()) {
+        const location = await authorizedLocation(
+          actor,
+          organizationId,
+          line.locationId,
+          'pharmacy.dispense',
+          session,
+        );
+        if (String(location.facilityId) !== input.pharmacyFacilityId)
+          throw ApiError.notFound('Stock location is unavailable at this pharmacy');
         const item = await PrescriptionItem.findOne({
           _id: line.prescriptionItemId,
           prescriptionId: prescription._id,
@@ -896,7 +976,7 @@ export async function dispense(
             warnings.push(`${item.medication.name} vs recorded allergy ${allergy.substance.text}`);
         }
         item.dispensedQuantity += line.quantity;
-        if (item.dispensedQuantity >= allowed) item.status = 'COMPLETED';
+        item.fulfillmentStatus = item.dispensedQuantity >= allowed ? 'FULFILLED' : 'PARTIAL';
         item.updatedBy = who(actor);
         await item.save({ session });
         lines.push({ ...line, line: index + 1, inventory, batch });
@@ -1004,7 +1084,7 @@ export async function returnDispense(
       await scoped(actor, organizationId, 'pharmacy.dispense', session, {
         facilityId: String(record.pharmacyFacilityId),
       });
-      await ownPractitioner(actor, session, ['PHARMACIST']);
+      await credentialedProfessional(actor, ['PHARMACIST'], session);
       for (const returned of input.lines) {
         const line = record.items.find((entry) => entry.line === returned.line);
         if (!line) throw ApiError.badRequest(`Line ${returned.line} is not on this dispense`);
@@ -1030,7 +1110,7 @@ export async function returnDispense(
         const item = await PrescriptionItem.findById(line.prescriptionItemId).session(session);
         if (item) {
           item.dispensedQuantity -= returned.quantity;
-          if (item.status === 'COMPLETED') item.status = 'ACTIVE';
+          item.fulfillmentStatus = item.dispensedQuantity === 0 ? 'UNFILLED' : 'PARTIAL';
           item.updatedBy = who(actor);
           await item.save({ session });
         }

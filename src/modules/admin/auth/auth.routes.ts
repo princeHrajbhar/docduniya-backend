@@ -8,6 +8,8 @@ import {
   forgotPasswordSchema,
   googleAuthSchema,
   loginSchema,
+  mfaCodeSchema,
+  mfaVerifySchema,
   registerSchema,
   resendOtpSchema,
   resetPasswordSchema,
@@ -23,6 +25,7 @@ router.post('/verify-otp', authLimiter, validate({ body: verifyOtpSchema }), con
 router.post('/resend-otp', otpLimiter, validate({ body: resendOtpSchema }), controller.resendOtp);
 router.post('/login', loginLimiter, validate({ body: loginSchema }), controller.login);
 router.post('/google', loginLimiter, validate({ body: googleAuthSchema }), controller.googleLogin);
+router.post('/mfa/verify', loginLimiter, validate({ body: mfaVerifySchema }), controller.mfaVerify);
 router.post('/refresh', authLimiter, controller.refresh);
 router.post('/logout', authLimiter, controller.logout);
 router.post(
@@ -48,6 +51,29 @@ router.delete(
   controller.revokeSession,
 );
 router.post('/logout-all', protect, controller.logoutAll);
+router.get('/mfa', protect, controller.mfaStatus);
+router.post('/mfa/totp/enroll', protect, authLimiter, controller.mfaEnroll);
+router.post(
+  '/mfa/totp/activate',
+  protect,
+  authLimiter,
+  validate({ body: mfaCodeSchema }),
+  controller.mfaActivate,
+);
+router.post(
+  '/mfa/recovery-codes',
+  protect,
+  authLimiter,
+  validate({ body: mfaCodeSchema }),
+  controller.mfaRecoveryCodes,
+);
+router.delete(
+  '/mfa/totp',
+  protect,
+  authLimiter,
+  validate({ body: mfaCodeSchema }),
+  controller.mfaDisable,
+);
 router.post(
   '/change-password',
   protect,

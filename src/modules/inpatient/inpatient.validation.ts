@@ -10,6 +10,8 @@ export const admissionInput = z.strictObject({
   facilityId: objectId,
   type: z.enum(['ELECTIVE', 'EMERGENCY', 'TRANSFER']),
   reason: conceptInput,
+  /** Arrival evidence when the admitting clinician has not yet seen the patient here. */
+  queueEntryId: objectId.optional(),
 });
 export const admitInput = z.strictObject({
   expectedVersion: version,

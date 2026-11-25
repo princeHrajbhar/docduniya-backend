@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { User } from '../modules/admin/auth/models/user.model.js';
 import { Session } from '../modules/admin/auth/models/session.model.js';
 import { AccessRole } from '../modules/admin/auth/roles/role.model.js';
+import { MfaChallenge, MfaFactor } from '../modules/admin/auth/mfa/mfa.model.js';
 import {
   Organization,
   Facility,
@@ -13,6 +14,7 @@ import {
   Patient,
   PatientRelationship,
   PatientRegistration,
+  PatientMergeCase,
 } from '../modules/patients/patient.model.js';
 import {
   Practitioner,
@@ -53,6 +55,12 @@ import * as inpatient from '../modules/inpatient/inpatient.model.js';
 import * as notifications from '../modules/notifications/notification.model.js';
 import * as engagement from '../modules/engagement/engagement.model.js';
 import { Subscription, SubscriptionPlan } from '../modules/commerce/subscription.service.js';
+import { ProfessionalCredentialReview } from '../modules/practitioners/credential.model.js';
+import * as intake from '../modules/intake/intake.model.js';
+import { WaitlistEntry } from '../modules/appointments/waitlist.model.js';
+import * as messaging from '../modules/messaging/messaging.model.js';
+import * as insurance from '../modules/insurance/insurance.model.js';
+import * as procedures from '../modules/procedures/procedure.model.js';
 
 export const foundationModels = [
   Organization,
@@ -64,12 +72,31 @@ export const foundationModels = [
   Patient,
   PatientRelationship,
   PatientRegistration,
+  PatientMergeCase,
   Practitioner,
   Doctor,
   Specialty,
   PractitionerQualification,
   PractitionerEmployment,
   ProfessionalRegistration,
+  ProfessionalCredentialReview,
+  // Intake and routing
+  intake.Questionnaire,
+  intake.QuestionnaireAssignment,
+  intake.IntakeResponse,
+  intake.ConcernMapping,
+  WaitlistEntry,
+  messaging.Conversation,
+  messaging.ConversationMessage,
+  // Insurance and claims
+  insurance.Payer,
+  insurance.InsuranceCoverage,
+  insurance.Preauthorization,
+  insurance.InsuranceClaim,
+  insurance.ClaimInvoice,
+  // Theatre and procedures
+  procedures.ProcedureCase,
+  procedures.TheatreLock,
   AuditEvent,
   OutboxEvent,
   IdempotencyKey,
@@ -168,7 +195,7 @@ export async function initializeFoundation(): Promise<void> {
   const hello = await mongoose.connection.db!.admin().command({ hello: 1 });
   if (!hello.setName && hello.msg !== 'isdbgrid')
     throw new Error('Foundation requires a MongoDB replica set or sharded cluster');
-  for (const entry of [User, Session, AccessRole, ...foundationModels]) {
+  for (const entry of [User, Session, AccessRole, MfaFactor, MfaChallenge, ...foundationModels]) {
     await entry.createCollection();
     await entry.createIndexes();
   }

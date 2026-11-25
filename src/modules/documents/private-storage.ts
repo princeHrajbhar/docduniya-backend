@@ -1,5 +1,4 @@
 import {
-  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -27,7 +26,8 @@ export interface PrivateObjectStore {
     key: string,
   ): Promise<{ sizeBytes: number; contentType?: string; versionId?: string } | undefined>;
   read(key: string, maxBytes: number): Promise<Buffer>;
-  copy(sourceKey: string, targetKey: string): Promise<{ versionId?: string }>;
+  /** Stores the exact scanned bytes once. Never copy a mutable upload key. */
+  putImmutable(key: string, content: Buffer, mimeType: string): Promise<{ versionId?: string }>;
   remove(key: string): Promise<void>;
   presignDownload(
     key: string,
@@ -75,16 +75,26 @@ class S3PrivateStore implements PrivateObjectStore {
   }
   async read(key: string, maxBytes: number) {
     const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
-    const bytes = await result.Body!.transformToByteArray();
-    if (bytes.length > maxBytes) throw new Error('Object exceeds the permitted size');
-    return Buffer.from(bytes);
+    if ((result.ContentLength ?? 0) > maxBytes)
+      throw new Error('Object exceeds the permitted size');
+    const chunks: Buffer[] = [];
+    let length = 0;
+    for await (const chunk of result.Body as AsyncIterable<Uint8Array>) {
+      length += chunk.length;
+      if (length > maxBytes) throw new Error('Object exceeds the permitted size');
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
   }
-  async copy(sourceKey: string, targetKey: string) {
+  async putImmutable(key: string, content: Buffer, mimeType: string) {
     const result = await this.client.send(
-      new CopyObjectCommand({
+      new PutObjectCommand({
         Bucket: this.bucket,
-        Key: targetKey,
-        CopySource: `${this.bucket}/${encodeURIComponent(sourceKey)}`,
+        Key: key,
+        Body: content,
+        ContentLength: content.length,
+        ContentType: mimeType,
+        IfNoneMatch: '*',
       }),
     );
     return { versionId: result.VersionId };

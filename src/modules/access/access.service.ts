@@ -5,6 +5,18 @@ import { stamp } from '../../shared/persistence/schema.js';
 import { Membership, ScopedRole, RoleAssignment } from './access.model.js';
 import { ROLE_TEMPLATES, type OrgPermission } from './access.constants.js';
 import { organizationForScope } from '../organizations/organization.repository.js';
+import { requireMfaForPrivilege } from '../admin/auth/mfa/mfa.service.js';
+
+/** Administration that can change who has access or move money needs a second factor. */
+const PRIVILEGED_PERMISSIONS = new Set<OrgPermission>([
+  'organization.manage',
+  'memberships.manage',
+  'roles.assign',
+  'merchant.manage',
+  'payments.refund',
+  'ledger.read',
+  'audit.read',
+]);
 
 export async function bootstrapOrganizationAccess(
   actor: CommandActor,
@@ -120,6 +132,7 @@ export async function authorizeOrganization(
     .lean();
   if (!roles.some((v) => v.permissionCodes.includes(permission)))
     throw ApiError.forbidden('Insufficient organization permissions');
+  if (PRIVILEGED_PERMISSIONS.has(permission)) await requireMfaForPrivilege(actor.userId);
   return {
     organization,
     membership,

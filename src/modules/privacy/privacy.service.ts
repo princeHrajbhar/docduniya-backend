@@ -115,7 +115,7 @@ export async function acknowledgePolicy(
 ) {
   const policy = await PolicyVersion.findById(input.policyVersionId);
   if (!policy) throw ApiError.notFound();
-  if (input.patientId) await authorizePatient(actor, input.patientId, 'profile.update');
+  if (input.patientId) await authorizePatient(actor, input.patientId, 'consent.manage');
   const acceptedAt = new Date();
   try {
     const [row] = await PolicyAcknowledgement.create([
@@ -170,7 +170,7 @@ export async function grantRecordSharing(
   key: string,
 ) {
   return command(actor, 'self', `consent.share:${patientId}`, key, input, async (session) => {
-    const patient = await authorizePatient(actor, patientId, 'profile.update', session, true);
+    const patient = await authorizePatient(actor, patientId, 'consent.manage', session, true);
     if (
       !(await Organization.exists({ _id: input.recipientOrganizationId, status: 'ACTIVE' }).session(
         session,
@@ -257,7 +257,7 @@ export async function withdrawConsent(
 ) {
   const preview = await Consent.findById(consentId);
   if (!preview) throw ApiError.notFound();
-  await authorizePatient(actor, String(preview.patientId), 'profile.update');
+  await authorizePatient(actor, String(preview.patientId), 'consent.manage');
   return command(actor, 'self', `consent.withdraw:${consentId}`, key, input, async (session) => {
     const consent = await Consent.findOne({
       _id: consentId,
@@ -265,7 +265,7 @@ export async function withdrawConsent(
       status: 'ACTIVE',
     }).session(session);
     if (!consent) conflict();
-    await authorizePatient(actor, String(consent.patientId), 'profile.update', session, true);
+    await authorizePatient(actor, String(consent.patientId), 'consent.manage', session, true);
     consent.set({
       status: 'WITHDRAWN',
       withdrawnAt: new Date(),
@@ -360,7 +360,7 @@ export async function listPatientConsents(
   patientId: string,
   query: z.infer<typeof consentQuery>,
 ) {
-  await authorizePatient(actor, patientId, 'profile.read');
+  await authorizePatient(actor, patientId, 'consent.manage');
   const rows = await Consent.find({
     patientId,
     ...(query.status ? { status: query.status } : {}),
@@ -562,7 +562,7 @@ export async function createPrivacyRequest(
   key: string,
 ) {
   return command(actor, 'self', `privacy-request:${patientId}`, key, input, async (session) => {
-    await authorizePatient(actor, patientId, 'profile.update', session);
+    await authorizePatient(actor, patientId, 'consent.manage', session);
     const [row] = await PrivacyRequest.create(
       [
         {
@@ -596,7 +596,7 @@ export async function listPrivacyRequests(
   page: Pagination,
   patientId?: string,
 ) {
-  if (patientId) await authorizePatient(actor, patientId, 'profile.read');
+  if (patientId) await authorizePatient(actor, patientId, 'consent.manage');
   else await requirePlatformPermission(actor, PERMISSIONS.PRIVACY_MANAGE);
   const rows = await PrivacyRequest.find({
     ...(patientId ? { patientId } : { status: { $nin: ['COMPLETED', 'REJECTED'] } }),
@@ -676,7 +676,7 @@ export async function decidePrivacyRequest(
 
 /** Machine-readable export of the patient's own data across providers; audited before disclosure. */
 export async function exportPatientData(actor: CommandActor, patientId: string) {
-  await authorizePatient(actor, patientId, 'profile.read');
+  await authorizePatient(actor, patientId, 'medical.export');
   const patient = await Patient.findById(patientId);
   if (!patient) throw ApiError.notFound();
   await recordRead(actor, 'patientExport', patientId, undefined, patientId);
@@ -826,7 +826,7 @@ export async function patientAccessHistory(
   patientId: string,
   page: Pagination,
 ) {
-  await authorizePatient(actor, patientId, 'profile.read');
+  await authorizePatient(actor, patientId, 'medical.read');
   const rows = await AuditEvent.find({ patientId, outcome: 'ALLOW', ...before(page.before) })
     .sort({ _id: -1 })
     .limit(page.limit + 1)

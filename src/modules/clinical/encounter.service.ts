@@ -2,13 +2,16 @@ import type { ClientSession } from 'mongoose';
 import type { z } from 'zod';
 import type { CommandActor } from '../../shared/domain/healthcare.js';
 import { command, conflict } from '../../shared/application/command.js';
-import { before, pageOf, scoped } from '../../shared/application/scope.js';
+import { before, facilityFilter, pageOf, scoped } from '../../shared/application/scope.js';
 import { stamp } from '../../shared/persistence/schema.js';
 import { ApiError } from '../../utils/api-error.js';
 import { Membership } from '../access/access.model.js';
+import { authorizeOrganization } from '../access/access.service.js';
+import { PatientRegistration } from '../patients/patient.model.js';
+import { todayInIndia } from '../../shared/domain/healthcare.js';
 import { recordChange, recordRead } from '../operations/operation.service.js';
 import { lockActiveFacility } from '../organizations/organization.repository.js';
-import { Appointment } from '../appointments/appointment.model.js';
+import { Appointment, QueueEntry } from '../appointments/appointment.model.js';
 import { Practitioner } from '../practitioners/practitioner.model.js';
 import { Consent } from '../privacy/privacy.model.js';
 import { authorizeClinical } from './clinical.policy.js';
@@ -35,21 +38,56 @@ export async function ensureCareAssignment(
     patientId: string;
     patientRegistrationId: string;
     visitId?: string;
+    facilityId?: string;
     practitionerId: string;
     userId: string;
     roleCode: 'ATTENDING' | 'CONSULTING' | 'NURSING' | 'ALLIED';
   },
   session: ClientSession,
 ) {
+  const registration = await PatientRegistration.findOne({
+    _id: entry.patientRegistrationId,
+    organizationId: entry.organizationId,
+    patientId: entry.patientId,
+    status: 'ACTIVE',
+  }).session(session);
+  if (!registration) throw ApiError.notFound();
+  const visit = entry.visitId
+    ? await Visit.findOne({
+        _id: entry.visitId,
+        organizationId: entry.organizationId,
+        patientId: entry.patientId,
+      }).session(session)
+    : null;
+  if (entry.visitId && !visit) throw ApiError.notFound('Visit is unavailable');
+  const facilityId =
+    entry.facilityId ?? String(visit?.facilityId ?? registration.primaryFacilityId);
+  const target = await authorizeOrganization(
+    { userId: entry.userId, requestId: actor.requestId },
+    entry.organizationId,
+    'clinical.read',
+    { facilityId, session, activeProvider: true },
+  );
+  const membershipValidFrom = target.membership.validFrom;
   const existing = await CareTeamAssignment.findOne({
     organizationId: entry.organizationId,
     patientId: entry.patientId,
     userId: entry.userId,
     status: 'ACTIVE',
+    facilityId,
+    membershipValidFrom,
   }).session(session);
   if (existing) return existing;
   const [row] = await CareTeamAssignment.create(
-    [{ ...stamp(actor.userId), ...entry, periodStart: new Date() }],
+    [
+      {
+        ...stamp(actor.userId),
+        ...entry,
+        facilityId,
+        membershipValidFrom,
+        periodStart: new Date(),
+      },
+    ],
     { session },
   );
   await recordChange(
@@ -91,6 +129,7 @@ export async function startEncounter(
       { session, facilityId: input.facilityId, requireCare: false },
     );
     await lockActiveFacility(organizationId, input.facilityId, session);
+    await requireArrival(actor, organizationId, input, session);
     if (input.appointmentId) {
       const appointment = await Appointment.findOne({
         _id: input.appointmentId,
@@ -128,6 +167,8 @@ export async function startEncounter(
         status: 'OPEN',
       }).session(session);
       if (!visit) throw ApiError.notFound('Open visit is unavailable');
+      if (String(visit.facilityId) !== input.facilityId)
+        throw ApiError.notFound('Visit is unavailable at this facility');
     } else {
       const [visit] = await Visit.create(
         [
@@ -185,6 +226,7 @@ export async function startEncounter(
         patientId: input.patientId,
         patientRegistrationId: String(registration._id),
         visitId,
+        facilityId: input.facilityId,
         practitionerId: String(practitioner._id),
         userId: actor.userId,
         roleCode: 'ATTENDING',
@@ -205,6 +247,53 @@ export async function startEncounter(
     );
     return { id: String(encounter!._id), version: 0 };
   });
+}
+
+/**
+ * Care starts only from independent evidence that the patient is here for this provider: a
+ * checked-in appointment, a walk-in queue entry recorded by the front desk today, an open visit
+ * (for example an admission), an existing care relationship or reviewed emergency access. A
+ * clinician cannot self-authorize chart access by opening an encounter for an unrelated patient.
+ */
+export async function requireArrival(
+  actor: CommandActor,
+  organizationId: string,
+  input: {
+    patientId: string;
+    facilityId: string;
+    appointmentId?: string;
+    visitId?: string;
+    queueEntryId?: string;
+  },
+  session: ClientSession,
+) {
+  if (input.appointmentId || input.visitId) return;
+  if (input.queueEntryId) {
+    const entry = await QueueEntry.findOne({
+      _id: input.queueEntryId,
+      organizationId,
+      facilityId: input.facilityId,
+      patientId: input.patientId,
+      localDay: todayInIndia(),
+      status: { $in: ['WAITING', 'CALLED', 'IN_SERVICE'] },
+    }).session(session);
+    if (!entry) throw ApiError.notFound('A current queue entry for this patient is required');
+    return;
+  }
+  try {
+    await authorizeClinical(actor, organizationId, input.patientId, 'clinical.write', {
+      session,
+      facilityId: input.facilityId,
+    });
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.statusCode !== 404) throw error;
+    throw new ApiError(
+      409,
+      'Record the patient’s arrival (check-in, walk-in queue entry or open visit) before starting care',
+      undefined,
+      'ARRIVAL_REQUIRED',
+    );
+  }
 }
 
 export async function encounterForWrite(
@@ -360,10 +449,11 @@ export async function listEncounters(
   query: z.infer<typeof encounterQuery>,
 ) {
   if (!query.patientId) throw ApiError.badRequest('Choose a patient');
-  await authorizeClinical(actor, organizationId, query.patientId, 'clinical.read');
+  const access = await authorizeClinical(actor, organizationId, query.patientId, 'clinical.read');
   const rows = await Encounter.find({
     organizationId,
     patientId: query.patientId,
+    ...facilityFilter(access.scope.membership),
     ...before(query.before),
   })
     .sort({ _id: -1 })

@@ -21,6 +21,11 @@ import {
 import { escalateOverdueTasks } from '../modules/clinical/task.service.js';
 import { expireBatches } from '../modules/pharmacy/pharmacy.service.js';
 import { renewSubscriptions } from '../modules/commerce/subscription.service.js';
+import { expireCredentials } from '../modules/practitioners/credential.service.js';
+import { offerWaitlistSlots } from '../modules/appointments/waitlist.service.js';
+import { flagLapsedDoctorAppointments } from '../modules/appointments/reassignment.service.js';
+import { serviceActor } from '../shared/application/scope.js';
+import { randomUUID } from 'node:crypto';
 
 interface Job {
   name: string;
@@ -33,6 +38,7 @@ export const jobs: Job[] = [
   { name: 'outbox-relay', everyMs: fast, run: () => relayOutbox() },
   { name: 'payment-inbox', everyMs: fast, run: () => processInbox() },
   { name: 'hold-expiry', everyMs: fast * 3, run: () => expireAppointmentHolds() },
+  { name: 'waitlist-offers', everyMs: fast * 6, run: () => offerWaitlistSlots() },
   { name: 'refunds', everyMs: fast * 3, run: () => processRefunds() },
   { name: 'payment-orders', everyMs: fast * 6, run: () => retryPendingOrders() },
   { name: 'notifications', everyMs: fast, run: () => deliverNotifications() },
@@ -41,6 +47,16 @@ export const jobs: Job[] = [
   { name: 'task-escalation', everyMs: 60_000, run: () => escalateOverdueTasks() },
   { name: 'batch-expiry', everyMs: 60 * 60_000, run: () => expireBatches() },
   { name: 'subscription-renewal', everyMs: 15 * 60_000, run: () => renewSubscriptions() },
+  {
+    name: 'doctor-credential-sweep',
+    everyMs: 15 * 60_000,
+    run: () => flagLapsedDoctorAppointments(),
+  },
+  {
+    name: 'credential-expiry',
+    everyMs: 60 * 60_000,
+    run: () => expireCredentials(serviceActor('credential-expiry', randomUUID())),
+  },
 ];
 
 let stopping = false;
