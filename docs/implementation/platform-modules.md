@@ -184,6 +184,7 @@ Amendments create new revisions, keep the original values and alert the orderer 
 - **Non-doctor credentials:** nurses, pharmacists, laboratory and allied professionals submit a declared registration (`POST /professionals/me/credential-reviews`). An independent platform reviewer (`professionals.verify`, not a colleague at the applicant's providers) approves with completed checks and an expiry of at most one year, never beyond the registration. Approval verifies the exact registration version reviewed. Suspension takes effect immediately; the worker expires lapsed approvals. Signing, dispensing, result verification and medication administration require a current credential.
 - **Doctor suspension** also places the doctor's upcoming appointments on the reassignment worklist (`requiresReassignment`), the same flag doctor leave uses; a worker sweep covers verifications that lapse by date.
 - **Two-factor sign-in (TOTP):** `POST /auth/mfa/totp/enroll` returns a secret and `otpauth://` URI; `POST /auth/mfa/totp/activate` proves possession, issues ten single-use recovery codes and signs out every other session. Afterwards password or Google sign-in returns `{ mfaRequired, challengeToken }` instead of a session; `POST /auth/mfa/verify` completes it with a code or a recovery code. Challenges last five minutes, allow five attempts and are single use; a code cannot be replayed within its window. Secrets are sealed with AES-256-GCM (`MFA_ENCRYPTION_KEY`).
+- **Administrator portal:** platform staff (any role granting platform permissions) sign in only through `POST /auth/admin/login` and `POST /auth/admin/verify`. Every sign-in emails a six-digit code (bcrypt-hashed in `adminSignInChallenges`, 10 minutes, five attempts, single use, one email per minute, three per attempt; a newer sign-in supersedes older attempts). The account is re-checked when the code is entered, and an enrolled authenticator is still required afterwards. `POST /auth/login` and `POST /auth/google` refuse staff accounts with `403 ADMIN_LOGIN_REQUIRED`; non-staff accounts at the portal receive the same answer as a wrong password. The frontend serves the portal at `/administrator/login`.
 - **Enforcement:** with `MFA_ENFORCE_PRIVILEGED=true`, platform review functions and privileged organization administration (organization management, memberships, role assignment, merchant, refunds, ledger, audit) return `403 MFA_ENROLLMENT_REQUIRED` until the user has enrolled. Because sign-in always demands an enrolled factor, every session of an enrolled user passed the second step.
 
 ### Intake questionnaires and concern routing
@@ -284,9 +285,11 @@ Integration suites run on a temporary MongoDB 8.2.6 replica set with synthetic d
 
 ## API contract
 
-The machine-readable OpenAPI 3.1 contract is generated from the mounted routers, so it always matches the served API (about 340 paths):
+The machine-readable OpenAPI 3.1 contract is generated from the mounted routers, so it always matches the served API (342 paths, 404 operations):
 
-- `GET /api/v1/openapi.json` serves it at runtime.
-- `npm run openapi` writes it to [docs/api/openapi.json](../api/openapi.json) for client generation.
+- `GET /api/v1/openapi.json` serves it at runtime: operations, path parameters, authentication and the shared envelopes.
+- `npm run openapi` writes the full version to [docs/api/openapi.json](../api/openapi.json) and the readable [API reference](../frontend/api-reference.md). The generator (`src/scripts/openapi.ts`, `src/scripts/api-docs/`) reads the route sources with the TypeScript compiler, finds the Zod schema each handler applies to `req.body`, `req.query` and path parameters (including `validate(...)` middleware and controllers), and evaluates it in its own module, so the documented schema is the exact instance the server validates with. It also records whether the handler requires an `Idempotency-Key`, the permission codes in its service code path, and the status enumerations of every model.
 
-It lists every operation with its path parameters, authentication, the `Idempotency-Key` requirement for commands and the shared success and error envelopes. Request schemas live next to each module in `*.validation.ts` and are the source of truth for fields, bounds and enums.
+Frontend developers start from the [frontend integration guide](../frontend/README.md): conventions, sign-in, navigation by role and permission, and the screen-by-screen workflows.
+
+`GET /me/workspaces` returns the caller's current provider memberships with organization, facility scope, roles and effective permissions, plus pending invitations, so the interface can build its navigation without guessing. `GET /me/patients` marks the account's own profile with `self: true`.

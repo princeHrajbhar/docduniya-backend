@@ -18,6 +18,8 @@ export const ErrorCode = {
   SESSION_NOT_FOUND: 'SESSION_NOT_FOUND',
   TOKEN_INVALID: 'TOKEN_INVALID',
   TOKEN_EXPIRED: 'TOKEN_EXPIRED',
+  /** Platform staff must use the administrator portal (password plus an emailed code). */
+  ADMIN_LOGIN_REQUIRED: 'ADMIN_LOGIN_REQUIRED',
   // Email
   EMAIL_SUPPRESSED: 'EMAIL_SUPPRESSED',
   EMAIL_DELIVERY_FAILED: 'EMAIL_DELIVERY_FAILED',

@@ -103,11 +103,11 @@ async function deliverVerificationCode(email: string): Promise<void> {
 
 // ── Sign-in ─────────────────────────────────────────────────────────────────
 
-export async function login(
-  email: string,
-  password: string,
-  meta: SessionMeta,
-): Promise<AuthTokens | MfaPending> {
+/**
+ * First factor shared by every password sign-in: lockout, constant-time comparison and failed
+ * attempt counting. Returns the account only when the password matches.
+ */
+export async function authenticatePassword(email: string, password: string): Promise<UserDocument> {
   const user = await User.findOne({ email }).select('+password');
 
   if (user?.lockedUntil && user.lockedUntil > new Date()) {
@@ -126,8 +126,32 @@ export async function login(
     logger.warn({ email }, 'Failed login attempt');
     throw new AppError('Invalid credentials', 401, ErrorCode.INVALID_CREDENTIALS);
   }
+  return user;
+}
 
+/** Platform staff are accounts whose role grants any platform permission. */
+export async function isPlatformStaff(role: string): Promise<boolean> {
+  return (await getRolePermissions(role)).length > 0;
+}
+
+/** Platform staff sign in only through the administrator portal, which emails a code each time. */
+async function assertNotPlatformStaff(user: Pick<UserDocument, 'role'>): Promise<void> {
+  if (await isPlatformStaff(user.role))
+    throw new AppError(
+      'Administrators sign in through the administrator portal',
+      403,
+      ErrorCode.ADMIN_LOGIN_REQUIRED,
+    );
+}
+
+export async function login(
+  email: string,
+  password: string,
+  meta: SessionMeta,
+): Promise<AuthTokens | MfaPending> {
+  const user = await authenticatePassword(email, password);
   assertCanSignIn(user);
+  await assertNotPlatformStaff(user);
   return beginSignIn(user, meta, () => startSession(user, meta, 'User logged in'));
 }
 
@@ -196,13 +220,14 @@ export async function loginWithGoogle(
 
   await otpService.clearSecrets(user.email, ['EMAIL_VERIFICATION']);
   assertCanSignIn(user);
+  await assertNotPlatformStaff(user);
   const signedIn = user;
   return beginSignIn(signedIn, meta, () =>
     startSession(signedIn, meta, 'User logged in with Google'),
   );
 }
 
-function assertCanSignIn(user: Pick<UserDocument, 'isVerified' | 'isActive'>): void {
+export function assertCanSignIn(user: Pick<UserDocument, 'isVerified' | 'isActive'>): void {
   if (!user.isVerified) {
     throw new AppError(
       'Please verify your account before logging in',
@@ -219,7 +244,7 @@ function assertCanSignIn(user: Pick<UserDocument, 'isVerified' | 'isActive'>): v
   }
 }
 
-async function startSession(
+export async function startSession(
   user: { _id: Types.ObjectId; role: string },
   meta: SessionMeta,
   logMessage: string,

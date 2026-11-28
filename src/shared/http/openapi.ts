@@ -3,8 +3,8 @@ import { optionalAuth, protect } from '../../modules/admin/auth/auth.middleware.
 /**
  * Machine-readable OpenAPI 3.1 contract generated from the mounted Express routers. Operations,
  * path parameters, authentication and idempotency requirements are derived from the routes
- * themselves; request bodies are validated server-side by strict schemas and documented as
- * JSON objects with the shared error envelope.
+ * themselves. At runtime request bodies are documented as JSON objects; `npm run openapi` passes
+ * `describe` to add the exact request schemas, summaries and permission codes from the sources.
  */
 type Handler = { handle?: unknown };
 type Layer = {
@@ -27,6 +27,40 @@ interface Operation {
   path: string;
   tag: string;
   secured: boolean;
+  /** The router that registered the route and the path it was registered with. */
+  router: RouterLike;
+  localPath: string;
+  /** Routers from the group's router down to `router`, with the path each is mounted at. */
+  routers: Array<{ router: unknown; prefix: string }>;
+}
+
+/** Context passed to `describe`, which can enrich an operation with documentation. */
+export interface OperationContext {
+  method: string;
+  path: string;
+  localPath: string;
+  router: unknown;
+  /** Express-style full path (`:param`), and the routers it passes through. */
+  expressPath: string;
+  routers: Array<{ router: unknown; prefix: string }>;
+  tag: string;
+  secured: boolean;
+}
+
+export interface OperationDetails {
+  summary?: string;
+  description?: string;
+  /** JSON Schema of the request body. */
+  body?: Record<string, unknown>;
+  bodyContentType?: string;
+  /** JSON Schema (an object) of the query string; each property becomes a query parameter. */
+  query?: Record<string, unknown>;
+  /** Whether the operation requires an `Idempotency-Key` header (overrides the default rule). */
+  idempotent?: boolean;
+  /** JSON Schemas of individual path parameters, by name. */
+  pathParams?: Record<string, Record<string, unknown>>;
+  /** Permission codes the handler checks. */
+  permissions?: string[];
 }
 
 function collect(
@@ -35,19 +69,41 @@ function collect(
   tag: string,
   inheritedAuth: boolean,
   out: Operation[],
+  parents: Array<{ router: unknown; prefix: string }> = [],
 ) {
+  const routers = [...parents, { router, prefix }];
   let secured = inheritedAuth;
+  const securedMounts = new Set<string>();
   for (const layer of router.stack) {
     if (layer.route) {
       const routeAuth = secured || layer.route.stack.some((handler) => handler.handle === protect);
       for (const method of Object.keys(layer.route.methods))
-        out.push({ method, path: `${prefix}${layer.route.path}`, tag, secured: routeAuth });
+        out.push({
+          method,
+          path: `${prefix}${layer.route.path}`,
+          tag,
+          secured: routeAuth,
+          router,
+          localPath: layer.route.path,
+          routers,
+        });
       continue;
     }
-    if (layer.handle === protect) secured = true;
-    else if (layer.handle === optionalAuth) continue;
+    const mountPath = layer.rawPath && layer.rawPath !== '/' ? layer.rawPath : '';
+    // `use(protect)` secures every later route; `use('/x', protect, router)` only that path.
+    if (layer.handle === protect) {
+      if (mountPath) securedMounts.add(mountPath);
+      else secured = true;
+    } else if (layer.handle === optionalAuth) continue;
     else if (isRouter(layer.handle))
-      collect(layer.handle, `${prefix}${layer.rawPath ?? ''}`, tag, secured, out);
+      collect(
+        layer.handle,
+        `${prefix}${mountPath}`,
+        tag,
+        secured || securedMounts.has(mountPath),
+        out,
+        routers,
+      );
   }
 }
 
@@ -64,6 +120,8 @@ export function buildOpenApi(
     version: string;
     serverUrl?: string;
     extra?: Array<{ tag: string; prefix: string; router: unknown }>;
+    /** Optional enrichment (summaries, request schemas, permissions) by the docs generator. */
+    describe?: (operation: OperationContext) => OperationDetails | undefined;
   },
 ) {
   const operations: Operation[] = [];
@@ -78,23 +136,46 @@ export function buildOpenApi(
     const id = `${operation.method} ${path}`;
     if (seen.has(id)) continue;
     seen.add(id);
+    const details = options.describe?.({
+      method: operation.method,
+      path,
+      localPath: operation.localPath,
+      router: operation.router,
+      expressPath: operation.path,
+      routers: operation.routers,
+      tag: operation.tag,
+      secured: operation.secured,
+    });
     const parameters: unknown[] = [...path.matchAll(/\{([A-Za-z0-9_]+)\}/gu)].map((match) => ({
       name: match[1],
       in: 'path',
       required: true,
-      schema: match[1]!.endsWith('Id')
-        ? { $ref: '#/components/schemas/ObjectId' }
-        : { type: 'string' },
+      schema:
+        details?.pathParams?.[match[1]!] ??
+        (match[1]!.endsWith('Id') ? { $ref: '#/components/schemas/ObjectId' } : { type: 'string' }),
     }));
     const mutating = MUTATING.has(operation.method);
     const idempotent =
-      mutating &&
-      operation.secured &&
-      !NO_IDEMPOTENCY_PREFIXES.some((prefix) => path.startsWith(prefix));
+      details?.idempotent ??
+      (mutating &&
+        operation.secured &&
+        !NO_IDEMPOTENCY_PREFIXES.some((prefix) => path.startsWith(prefix)));
     if (idempotent) parameters.push({ $ref: '#/components/parameters/IdempotencyKey' });
+    const query = details?.query as
+      { properties?: Record<string, unknown>; required?: string[] } | undefined;
+    for (const [name, schema] of Object.entries(query?.properties ?? {}))
+      parameters.push({
+        name,
+        in: 'query',
+        required: query?.required?.includes(name) ?? false,
+        schema,
+      });
     paths[path] ??= {};
     paths[path]![operation.method] = {
       tags: [operation.tag],
+      ...(details?.summary ? { summary: details.summary } : {}),
+      ...(details?.description ? { description: details.description } : {}),
+      ...(details?.permissions?.length ? { 'x-permissions': details.permissions } : {}),
       operationId: `${operation.method}${path
         .replace(/\{([^}]+)\}/gu, 'By_$1')
         .split(/[^A-Za-z0-9]+/u)
@@ -105,14 +186,23 @@ export function buildOpenApi(
         ? { security: [{ bearerAuth: [] }, { cookieAuth: [] }] }
         : { security: [] }),
       ...(parameters.length ? { parameters } : {}),
-      ...(mutating && operation.method !== 'delete'
+      ...(details?.body
         ? {
             requestBody: {
-              required: false,
-              content: { 'application/json': { schema: { type: 'object' } } },
+              required: true,
+              content: {
+                [details.bodyContentType ?? 'application/json']: { schema: details.body },
+              },
             },
           }
-        : {}),
+        : mutating && operation.method !== 'delete'
+          ? {
+              requestBody: {
+                required: false,
+                content: { 'application/json': { schema: { type: 'object' } } },
+              },
+            }
+          : {}),
       responses: {
         [operation.method === 'post' ? '201' : '200']: {
           description: 'Success envelope',

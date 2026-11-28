@@ -128,6 +128,76 @@ describe('HTTP surface', () => {
     expect(spec.paths['/webhooks/payments/razorpay/{merchantAccountId}']).toBeDefined();
   });
 
+  it('marks the account’s own patient profile in the profile list', async () => {
+    const person = await account();
+    const own = await patient(person, 'Own Profile');
+    const list = await request(app)
+      .get('/api/v1/me/patients')
+      .set('Authorization', `Bearer ${person.token}`);
+    expect(list.status).toBe(200);
+    expect(list.body.data.items).toEqual([
+      expect.objectContaining({ id: own.id, self: true, status: 'ACTIVE' }),
+    ]);
+    expect(list.body.data.items[0]).not.toHaveProperty('ownerUserId');
+  });
+
+  it('lists the caller’s workspaces with roles, effective permissions and invitations', async () => {
+    const mine = await request(app)
+      .get('/api/v1/me/workspaces')
+      .set('Authorization', `Bearer ${owner.token}`);
+    expect(mine.status).toBe(200);
+    expect(mine.headers['cache-control']).toBe('no-store');
+    const workspace = mine.body.data.workspaces.find(
+      (item: { organization: { id: string } }) => item.organization.id === clinic.organizationId,
+    );
+    expect(workspace.organization).toMatchObject({
+      displayName: 'Synthetic Provider',
+      status: 'ACTIVE',
+    });
+    expect(workspace.roles.map((role: { slug: string }) => role.slug)).toContain('owner');
+    expect(workspace.permissions).toContain('organization.manage');
+    // Administration never implies clinical access.
+    expect(workspace.permissions).not.toContain('clinical.read');
+
+    const receptionist = await account();
+    const invite = await request(app)
+      .post(`/api/v1/organizations/${clinic.organizationId}/memberships`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .set('Idempotency-Key', key())
+      .send({
+        userId: receptionist.userId,
+        role: 'receptionist',
+        facilityScope: 'SELECTED',
+        facilityIds: [clinic.facilityId],
+      });
+    expect(invite.status).toBe(201);
+    const invited = await request(app)
+      .get('/api/v1/me/workspaces')
+      .set('Authorization', `Bearer ${receptionist.token}`);
+    expect(invited.body.data.workspaces).toEqual([]);
+    expect(invited.body.data.invitations).toHaveLength(1);
+    expect(invited.body.data.invitations[0].organization.id).toBe(clinic.organizationId);
+
+    const accepted = await request(app)
+      .post(`/api/v1/me/memberships/${invite.body.data.id}/accept`)
+      .set('Authorization', `Bearer ${receptionist.token}`)
+      .set('Idempotency-Key', key())
+      .send({ expectedVersion: invite.body.data.version });
+    expect(accepted.status).toBe(200);
+    const member = await request(app)
+      .get('/api/v1/me/workspaces')
+      .set('Authorization', `Bearer ${receptionist.token}`);
+    expect(member.body.data.invitations).toEqual([]);
+    const [desk] = member.body.data.workspaces;
+    expect(desk.facilityScope).toBe('SELECTED');
+    expect(desk.facilityIds).toEqual([clinic.facilityId]);
+    expect(desk.roles).toEqual([expect.objectContaining({ slug: 'receptionist' })]);
+    expect(desk.permissions).toEqual(
+      expect.arrayContaining(['appointments.manage', 'queue.manage']),
+    );
+    expect(desk.permissions).not.toContain('memberships.manage');
+  });
+
   it('rejects unsigned gateway webhooks for unknown merchants', async () => {
     const response = await request(app)
       .post(`/api/v1/webhooks/payments/razorpay/${new Types.ObjectId()}`)

@@ -4,6 +4,9 @@ import * as controller from './auth.controller.js';
 import { protect } from './auth.middleware.js';
 import { authLimiter, loginLimiter, otpLimiter, resetPasswordLimiter } from './auth.rate-limit.js';
 import {
+  adminLoginSchema,
+  adminResendSchema,
+  adminVerifySchema,
   changePasswordSchema,
   forgotPasswordSchema,
   googleAuthSchema,
@@ -26,6 +29,27 @@ router.post('/resend-otp', otpLimiter, validate({ body: resendOtpSchema }), cont
 router.post('/login', loginLimiter, validate({ body: loginSchema }), controller.login);
 router.post('/google', loginLimiter, validate({ body: googleAuthSchema }), controller.googleLogin);
 router.post('/mfa/verify', loginLimiter, validate({ body: mfaVerifySchema }), controller.mfaVerify);
+
+// Administrator portal: password, then a code emailed on every sign-in.
+router.post(
+  '/admin/login',
+  loginLimiter,
+  otpLimiter,
+  validate({ body: adminLoginSchema }),
+  controller.adminSignIn,
+);
+router.post(
+  '/admin/verify',
+  loginLimiter,
+  validate({ body: adminVerifySchema }),
+  controller.adminVerify,
+);
+router.post(
+  '/admin/resend-code',
+  otpLimiter,
+  validate({ body: adminResendSchema }),
+  controller.adminResendCode,
+);
 router.post('/refresh', authLimiter, controller.refresh);
 router.post('/logout', authLimiter, controller.logout);
 router.post(

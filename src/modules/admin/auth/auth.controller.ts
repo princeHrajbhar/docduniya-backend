@@ -5,6 +5,7 @@ import { clearAuthCookies, readRefreshCookie, setAuthCookies } from './auth.cook
 import * as authService from './auth.service.js';
 import type { AuthTokens, SessionMeta } from './auth.types.js';
 import * as mfa from './mfa/mfa.service.js';
+import * as adminLogin from './admin-login.service.js';
 import type {
   ChangePasswordInput,
   LoginInput,
@@ -152,6 +153,39 @@ export async function revokeSession(req: Request<{ sessionId: string }>, res: Re
 
 export async function me(req: Request, res: Response) {
   res.json({ success: true, data: await authService.getCurrentUser(req.user!.userId) });
+}
+
+// ── Administrator portal ───────────────────────────────────────────────────
+
+/** Password step: no session yet; a code is emailed to the administrator. */
+export async function adminSignIn(req: Request, res: Response) {
+  res.set('Cache-Control', 'no-store');
+  const { email, password } = req.body as LoginInput;
+  const data = await adminLogin.startAdminSignIn(email, password, sessionMeta(req));
+  res.json({ success: true, message: `We sent a sign-in code to ${data.sentTo}`, data });
+}
+
+export async function adminResendCode(req: Request, res: Response) {
+  res.set('Cache-Control', 'no-store');
+  const { challengeToken } = req.body as { challengeToken: string };
+  const data = await adminLogin.resendAdminSignInCode(challengeToken, sessionMeta(req));
+  res.json({ success: true, message: `We sent a new code to ${data.sentTo}`, data });
+}
+
+/** Code step: a session, or the authenticator step when one is enrolled. */
+export async function adminVerify(req: Request, res: Response) {
+  const result = await adminLogin.completeAdminSignIn(
+    req.body as { challengeToken: string; code: string },
+    sessionMeta(req),
+  );
+  if (mfaPending(res, result)) return;
+  const tokens = result as AuthTokens;
+  setAuthCookies(res, tokens);
+  res.json({
+    success: true,
+    message: 'Logged in successfully',
+    data: { accessToken: tokens.accessToken },
+  });
 }
 
 // ── Second factor ──────────────────────────────────────────────────────────

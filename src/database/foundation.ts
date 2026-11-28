@@ -3,6 +3,7 @@ import { User } from '../modules/admin/auth/models/user.model.js';
 import { Session } from '../modules/admin/auth/models/session.model.js';
 import { AccessRole } from '../modules/admin/auth/roles/role.model.js';
 import { MfaChallenge, MfaFactor } from '../modules/admin/auth/mfa/mfa.model.js';
+import { AdminSignInChallenge } from '../modules/admin/auth/models/admin-signin.model.js';
 import {
   Organization,
   Facility,
@@ -195,7 +196,15 @@ export async function initializeFoundation(): Promise<void> {
   const hello = await mongoose.connection.db!.admin().command({ hello: 1 });
   if (!hello.setName && hello.msg !== 'isdbgrid')
     throw new Error('Foundation requires a MongoDB replica set or sharded cluster');
-  for (const entry of [User, Session, AccessRole, MfaFactor, MfaChallenge, ...foundationModels]) {
+  for (const entry of [
+    User,
+    Session,
+    AccessRole,
+    MfaFactor,
+    MfaChallenge,
+    AdminSignInChallenge,
+    ...foundationModels,
+  ]) {
     await entry.createCollection();
     await entry.createIndexes();
   }

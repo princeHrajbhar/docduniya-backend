@@ -1,13 +1,21 @@
 import { Router, type Request } from 'express';
 import { protect } from '../admin/auth/auth.middleware.js';
 import { actor, idempotencyKey } from '../../shared/http/context.js';
-import { idParam, ok } from '../../shared/http/handler.js';
+import { idParam, noStore, ok } from '../../shared/http/handler.js';
 import * as roles from './role-assignment.service.js';
+import { myWorkspaces } from './workspace.service.js';
 import { roleAssignmentInput, roleRevocationInput } from './membership.validation.js';
 
 const router = Router();
 const org = '/organizations/:organizationId';
 const orgId = (req: Request) => idParam(req, 'organizationId');
+
+// Navigation: the caller's provider workspaces with roles and effective permissions.
+router.get(
+  '/me/workspaces',
+  protect,
+  noStore((req) => myWorkspaces(actor(req))),
+);
 
 router.get(
   `${org}/memberships/:membershipId/role-assignments`,

@@ -186,14 +186,19 @@ export async function listOwnPatients(actor: CommandActor, page: Pagination) {
     ...(page.before ? { _id: { $lt: new Types.ObjectId(page.before) } } : {}),
     status: { $in: ['ACTIVE', 'TEMPORARY'] },
   })
-    .select('name status version')
+    .select('name status version ownerUserId')
     .sort({ _id: -1 })
     .limit(page.limit + 1)
     .lean();
   for (const row of rows.slice(0, page.limit))
     await recordRead(actor, 'patient', String(row._id), undefined, String(row._id));
   return {
-    items: rows.slice(0, page.limit).map(({ _id, ...row }) => ({ id: String(_id), ...row })),
+    // `self` marks the account's own profile; the others are reviewed dependents.
+    items: rows.slice(0, page.limit).map(({ _id, ownerUserId, ...row }) => ({
+      id: String(_id),
+      ...row,
+      self: String(ownerUserId) === actor.userId,
+    })),
     nextCursor: rows.length > page.limit ? String(rows[page.limit - 1]!._id) : undefined,
   };
 }

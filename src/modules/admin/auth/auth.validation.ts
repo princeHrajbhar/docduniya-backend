@@ -117,3 +117,16 @@ export const mfaVerifySchema = z
   .refine((value) => Boolean(value.code) !== Boolean(value.recoveryCode), {
     message: 'Provide either an authenticator code or a recovery code',
   });
+
+// ── Administrator portal ────────────────────────────────────────────────────
+
+const challengeTokenSchema = z.string().trim().min(20).max(200);
+export const adminLoginSchema = loginSchema;
+export const adminVerifySchema = z.strictObject({
+  challengeToken: challengeTokenSchema,
+  code: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/u, 'Enter the 6-digit code from the email'),
+});
+export const adminResendSchema = z.strictObject({ challengeToken: challengeTokenSchema });

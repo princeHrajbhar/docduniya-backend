@@ -73,3 +73,35 @@ export function sendAccountSetupEmail(input: {
     }),
   });
 }
+
+/** The code an administrator enters after their password; sent on every administrator sign-in. */
+export function sendAdminSignInCodeEmail(
+  to: string,
+  code: string,
+  context: { expiresAt: Date; ip?: string; userAgent?: string },
+) {
+  const brand = getBrandName();
+  const validFor = Math.max(1, Math.round((context.expiresAt.getTime() - Date.now()) / 60_000));
+  const where = [context.ip, context.userAgent].filter(Boolean).join(' · ');
+  return sendEmail({
+    to,
+    senderPurpose: 'auth',
+    sensitive: true,
+    template: 'admin-sign-in-code',
+    subject: `Your ${brand} administrator sign-in code`,
+    html: emailLayout({
+      eyebrow: 'Administrator sign-in',
+      title: 'Confirm it is you',
+      preheader: `Your administrator sign-in code is ${code}`,
+      body:
+        '<p style="margin:0 0 14px">Someone entered the correct password for your administrator account. Enter this code to finish signing in.</p>' +
+        `<div style="margin:24px 0;text-align:center;font-size:34px;letter-spacing:8px;font-weight:800;color:#111827">${escapeEmailHtml(code)}</div>` +
+        `<p style="margin:0 0 14px">The code expires in ${validFor} minutes and works once.</p>` +
+        (where
+          ? `<p style="margin:0 0 14px;color:#6b7280">Sign-in from: ${escapeEmailHtml(where)}</p>`
+          : '') +
+        '<p style="margin:0"><strong>If this was not you, do not share the code and change your password now.</strong></p>',
+    }),
+    text: `Your ${brand} administrator sign-in code is ${code}. It expires in ${validFor} minutes and works once. If this was not you, change your password now.`,
+  });
+}

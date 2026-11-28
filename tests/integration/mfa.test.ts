@@ -5,6 +5,8 @@ import { User } from '../../src/modules/admin/auth/models/user.model.js';
 import { hashPassword } from '../../src/modules/admin/auth/auth.crypto.js';
 import { SUPER_ADMIN_ROLE } from '../../src/modules/admin/auth/auth.constants.js';
 import { mfaPolicy } from '../../src/modules/admin/auth/mfa/mfa.service.js';
+import { adminCodeDelivery } from '../../src/modules/admin/auth/admin-login.service.js';
+import { AdminSignInChallenge } from '../../src/modules/admin/auth/models/admin-signin.model.js';
 import { base32Decode, currentStep, totpAt } from '../../src/modules/admin/auth/mfa/totp.js';
 import { listCredentialReviews } from '../../src/modules/practitioners/credential.service.js';
 import { key, startDatabase, stopDatabase } from './support.js';
@@ -23,12 +25,33 @@ async function user(role = 'user') {
   });
   return { email, userId: String(row._id) };
 }
-const login = (email: string) =>
-  request(app).post('/api/v1/auth/login').send({ email, password: PASSWORD });
+const codes = new Map<string, string>();
+const originalDelivery = adminCodeDelivery.send;
+/** Administrators sign in through the portal: password, emailed code, then any authenticator. */
+async function login(email: string) {
+  const ip = `10.9.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250)}`;
+  await AdminSignInChallenge.updateMany({}, { $set: { lastSentAt: new Date(0) } });
+  const started = await request(app)
+    .post('/api/v1/auth/admin/login')
+    .set('X-Forwarded-For', ip)
+    .send({ email, password: PASSWORD });
+  expect(started.status).toBe(200);
+  return request(app)
+    .post('/api/v1/auth/admin/verify')
+    .set('X-Forwarded-For', ip)
+    .send({ challengeToken: started.body.data.challengeToken, code: codes.get(email) });
+}
 
-beforeAll(startDatabase);
+beforeAll(async () => {
+  await startDatabase();
+  adminCodeDelivery.send = async (to: string, code: string) => {
+    codes.set(to, code);
+    return { messageId: 'test', to };
+  };
+});
 afterAll(async () => {
   mfaPolicy.enforcePrivileged = false;
+  adminCodeDelivery.send = originalDelivery;
   await stopDatabase();
 });
 
@@ -59,7 +82,7 @@ describe('Two-factor sign-in', () => {
     const recovery = activated.body.data.recoveryCodes as string[];
     expect(recovery).toHaveLength(10);
 
-    // Password alone no longer yields a session.
+    // Password and emailed code alone no longer yield a session.
     const pending = await login(admin.email);
     expect(pending.status).toBe(200);
     expect(pending.body.data.mfaRequired).toBe(true);
